@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metrock-erp/contracts/events/grn.posted.v1.json",
+  "title": "grn.posted.v1",
+  "description": "Emitted once per accepted Goods Receipt line by procurement-service (src/procurement/procurement.service.ts) and consumed by ledger-service (internal/kafka/consumer.go) to post a Dr Raw Material Inventory / Cr Accounts Payable journal entry. See docs/SDD.md §3.B.",
+  "type": "object",
+  "required": ["event_type", "event_id", "tenant_id", "grn_id", "grn_line_id", "po_line_id", "plant_id", "accepted_qty", "unit_cost", "accepted_value", "posted_at"],
+  "properties": {
+    "event_type": { "const": "grn.posted.v1" },
+    "event_id": { "type": "string", "format": "uuid", "description": "== grn_line_id. Doubles as journal_entries.source_event_id for idempotent posting." },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "grn_id": { "type": "string", "format": "uuid" },
+    "grn_line_id": { "type": "string", "format": "uuid" },
+    "po_line_id": { "type": "string", "format": "uuid" },
+    "plant_id": { "type": "string", "format": "uuid" },
+    "accepted_qty": { "type": "number", "minimum": 0 },
+    "unit_cost": { "type": "number", "minimum": 0 },
+    "accepted_value": { "type": "number", "minimum": 0, "description": "accepted_qty * unit_cost — matches posting_rules.amount_expression for this event_type in the dev seed." },
+    "posted_at": { "type": "string", "format": "date-time" }
+  }
+}

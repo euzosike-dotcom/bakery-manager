@@ -1,0 +1,26 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Go
+backend/ledger-service/ledger-service
+backend/ledger-service/*.exe
+
+# Flutter
+apps/mobile/.dart_tool/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/.packages
+apps/mobile/build/
+apps/mobile/**/generated_plugin_registrant.dart
+apps/mobile/**/*.g.dart
+apps/mobile/**/*.drift.dart
+
+# Postgres data volume (docker-compose)
+infra/.pgdata/
+infra/.miniodata/

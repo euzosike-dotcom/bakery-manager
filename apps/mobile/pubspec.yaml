@@ -1,0 +1,42 @@
+name: metrock_mobile
+description: >
+  Offline-first Flutter client for the Metrock ERP platform. This vertical
+  slice implements Goods Receipt (GRN) capture on a plant/warehouse tablet —
+  see docs/SDD.md §2 (Offline-First Sync Engine Architecture) and §3.B
+  (Supply Chain, Procurement & Stores).
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Local relational cache (SDD §2.1) — chosen over Hive/WatermelonDB because
+  # the offline domain data (POs, GRNs, lines) is inherently relational.
+  drift: ^2.20.2
+  sqlite3_flutter_libs: ^0.5.24
+  path_provider: ^2.1.4
+  path: ^1.9.0
+
+  # Sync + connectivity
+  http: ^1.2.2
+  connectivity_plus: ^6.0.5
+  uuid: ^4.5.1
+
+  # State management
+  flutter_bloc: ^8.1.6
+  equatable: ^2.0.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  build_runner: ^2.4.12
+  drift_dev: ^2.20.2
+  lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

@@ -1,0 +1,145 @@
+// Prisma schema for the Procurement & Stores domain service.
+// Mirrors infra/postgres/migrations exactly (table/column names match via @@map/@map)
+// so this service and the SQL migrations never drift out of sync.
+//
+// NOTE: `prisma migrate` is NOT used to create these tables — the hand-written
+// SQL migrations in infra/postgres/migrations are the source of truth (they
+// also define RLS policies and CHECK constraints that Prisma's migration
+// engine doesn't model well). This schema is generate-only: run
+// `npx prisma db pull` after changing the SQL migrations, or hand-edit to match.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Plant {
+  tenantId    String @map("tenant_id") @db.Uuid
+  plantId     String @map("plant_id") @db.Uuid
+  plantCode   String @map("plant_code")
+  plantName   String @map("plant_name")
+  plantStatus String @map("plant_status")
+
+  warehouses      Warehouse[]
+  purchaseOrders  PurchaseOrder[]
+
+  @@id([tenantId, plantId])
+  @@map("plants")
+}
+
+model Warehouse {
+  tenantId      String @map("tenant_id") @db.Uuid
+  warehouseId   String @map("warehouse_id") @db.Uuid
+  warehouseCode String @map("warehouse_code")
+  warehouseName String @map("warehouse_name")
+  plantId       String @map("plant_id") @db.Uuid
+  isActive      Boolean @map("is_active")
+
+  plant Plant @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  goodsReceipts GoodsReceipt[]
+
+  @@id([tenantId, warehouseId])
+  @@map("warehouses")
+}
+
+model Supplier {
+  tenantId     String @map("tenant_id") @db.Uuid
+  supplierId   String @map("supplier_id") @db.Uuid
+  supplierCode String @map("supplier_code")
+  supplierName String @map("supplier_name")
+  paymentTerms String? @map("payment_terms")
+
+  purchaseOrders PurchaseOrder[]
+
+  @@id([tenantId, supplierId])
+  @@map("suppliers")
+}
+
+model PurchaseOrder {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  poId            String   @map("po_id") @db.Uuid
+  poNumber        String   @map("po_number")
+  supplierId      String   @map("supplier_id") @db.Uuid
+  plantId         String   @map("plant_id") @db.Uuid
+  poDate          DateTime @map("po_date") @db.Date
+  currency        String
+  approvalStatus  String   @map("approval_status")
+  poStatus        String   @map("po_status")
+  totalPoValue    Decimal  @map("total_po_value") @db.Decimal(14, 2)
+
+  supplier Supplier @relation(fields: [tenantId, supplierId], references: [tenantId, supplierId])
+  plant    Plant    @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  lines    PurchaseOrderLine[]
+  goodsReceipts GoodsReceipt[]
+
+  @@id([tenantId, poId])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLine {
+  tenantId       String  @map("tenant_id") @db.Uuid
+  poLineId       String  @map("po_line_id") @db.Uuid
+  poId           String  @map("po_id") @db.Uuid
+  skuDescription String  @map("sku_description")
+  orderedQty     Decimal @map("ordered_qty") @db.Decimal(14, 3)
+  receivedQty    Decimal @map("received_qty") @db.Decimal(14, 3)
+  uom            String
+  unitCost       Decimal @map("unit_cost") @db.Decimal(14, 2)
+  lineStatus     String  @map("line_status")
+
+  purchaseOrder PurchaseOrder @relation(fields: [tenantId, poId], references: [tenantId, poId])
+  goodsReceiptLines GoodsReceiptLine[]
+
+  @@id([tenantId, poLineId])
+  @@map("purchase_order_lines")
+}
+
+model GoodsReceipt {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  grnId          String   @map("grn_id") @db.Uuid
+  grnNumber      String   @map("grn_number")
+  poId           String   @map("po_id") @db.Uuid
+  receiptDate    DateTime @map("receipt_date")
+  warehouseId    String   @map("warehouse_id") @db.Uuid
+  receiverUserId String?  @map("receiver_user_id") @db.Uuid
+  qcStatus       String   @map("qc_status")
+  postingStatus  String   @map("posting_status")
+  clientEventId  String   @map("client_event_id") @db.Uuid
+  deviceId       String?  @map("device_id") @db.Uuid
+  createdOffline Boolean  @map("created_offline")
+  syncSeq        BigInt   @map("sync_seq")
+  createdAt      DateTime @map("created_at")
+
+  purchaseOrder PurchaseOrder @relation(fields: [tenantId, poId], references: [tenantId, poId])
+  warehouse     Warehouse     @relation(fields: [tenantId, warehouseId], references: [tenantId, warehouseId])
+  lines         GoodsReceiptLine[]
+
+  @@id([tenantId, grnId])
+  @@unique([tenantId, clientEventId])
+  @@map("goods_receipts")
+}
+
+model GoodsReceiptLine {
+  tenantId      String  @map("tenant_id") @db.Uuid
+  grnLineId     String  @map("grn_line_id") @db.Uuid
+  grnId         String  @map("grn_id") @db.Uuid
+  poLineId      String  @map("po_line_id") @db.Uuid
+  receivedQty   Decimal @map("received_qty") @db.Decimal(14, 3)
+  acceptedQty   Decimal @map("accepted_qty") @db.Decimal(14, 3)
+  rejectedQty   Decimal @map("rejected_qty") @db.Decimal(14, 3)
+  uom           String
+  unitCost      Decimal @map("unit_cost") @db.Decimal(14, 2)
+  clientEventId String  @map("client_event_id") @db.Uuid
+  syncSeq       BigInt  @map("sync_seq")
+
+  goodsReceipt      GoodsReceipt      @relation(fields: [tenantId, grnId], references: [tenantId, grnId])
+  purchaseOrderLine PurchaseOrderLine @relation(fields: [tenantId, poLineId], references: [tenantId, poLineId])
+
+  @@id([tenantId, grnLineId])
+  @@unique([tenantId, clientEventId])
+  @@map("goods_receipt_lines")
+}

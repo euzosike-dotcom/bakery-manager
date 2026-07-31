@@ -1,0 +1,66 @@
+name: metrock-erp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: metrock
+      POSTGRES_PASSWORD: metrock_dev_password
+      POSTGRES_DB: metrock_erp
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.pgdata:/var/lib/postgresql/data
+      - ./postgres/migrations:/migrations
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metrock -d metrock_erp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      # Advertised as localhost:9092, not redpanda:9092: procurement-service
+      # and ledger-service both run on the host for this vertical slice, not
+      # as containers on the compose network. Kafka clients connect once to
+      # the bootstrap address, then re-dial whatever address the broker
+      # advertises in its cluster metadata — advertising the in-network
+      # hostname here breaks every host-run consumer/producer with a DNS
+      # lookup failure on "redpanda" after the very first connection
+      # succeeds. If a service is later containerized on this compose
+      # network, it needs its own listener (Redpanda supports multiple
+      # advertised listeners) rather than flipping this back.
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=localhost:8082
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: metrock
+      MINIO_ROOT_PASSWORD: metrock_dev_password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./.miniodata:/data
