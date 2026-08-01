@@ -23,6 +23,7 @@ part 'database.g.dart';
   ProductionConsumptionLocal,
   SalesOrdersLocal,
   NcrCollectionsLocal,
+  ActivitiesLocal,
   OutboxEvents,
   SyncCursors,
 ])
@@ -30,7 +31,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -38,10 +39,12 @@ class AppDatabase extends _$AppDatabase {
         onUpgrade: (m, from, to) async {
           // v1 -> v2: added the Manufacturing module's local tables.
           // v2 -> v3: added the Sales & Agent Capital module's local
-          // tables. Both are purely additive so far (no existing table
-          // changed shape) — a real column/type change on an existing
-          // table would need a proper step-by-step migration here instead
-          // of blanket createTable calls.
+          // tables. v3 -> v4: added the CRM module's one local table
+          // (Activities — Customers/Opportunities have no local table, see
+          // ActivitiesLocal's doc comment). All purely additive so far (no
+          // existing table changed shape) — a real column/type change on an
+          // existing table would need a proper step-by-step migration here
+          // instead of blanket createTable calls.
           if (from < 2) {
             await m.createTable(productionBatchesLocal);
             await m.createTable(productionConsumptionLocal);
@@ -49,6 +52,10 @@ class AppDatabase extends _$AppDatabase {
           if (from < 3) {
             await m.createTable(salesOrdersLocal);
             await m.createTable(ncrCollectionsLocal);
+          }
+          if (from < 4) {
+            await m.createTable(activitiesLocal);
+            await m.addColumn(salesOrdersLocal, salesOrdersLocal.customerId);
           }
         },
       );

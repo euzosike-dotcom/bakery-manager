@@ -62,6 +62,17 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// Customers, for the picker on the Customers tab and on Sales Order
+  /// capture. Same online-only simplification as fetchPurchaseOrders/
+  /// fetchRecipes/fetchAgents — no local cache table, so a device needs
+  /// connectivity at least once before a customer can be picked (see
+  /// ActivitiesLocal's doc comment).
+  Future<List<Map<String, dynamic>>> fetchCustomers() async {
+    final res = await _client.get(Uri.parse('$baseUrl/customers'), headers: _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
   /// Pushes a batch of outbox events. Returns the per-event result array —
   /// callers must inspect each entry's `status`, a 200 response does not
   /// mean every event was accepted (SDD §2.2: push is per-event ack/reject).

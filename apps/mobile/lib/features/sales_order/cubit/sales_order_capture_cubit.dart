@@ -28,17 +28,21 @@ class SalesOrderCaptureCubit extends Cubit<SalesOrderCaptureState> {
     required String agentId,
     required String plantId,
     required double availableCapitalAtOpen,
+    List<Map<String, dynamic>> customers = const [],
   }) : super(SalesOrderCaptureState(
           status: SalesOrderCaptureStatus.ready,
           agentId: agentId,
           plantId: plantId,
           availableCapitalAtOpen: availableCapitalAtOpen,
+          customers: customers,
         ));
 
   final SalesOrderRepository repository;
 
   void updateOrderedQty(double qty) => emit(state.copyWith(orderedQty: qty));
   void updateUnitPrice(double price) => emit(state.copyWith(unitPrice: price));
+  void updateCustomerId(String? customerId) =>
+      emit(state.copyWith(customerId: customerId, clearCustomerId: customerId == null));
 
   Future<void> submit() async {
     if (state.orderedQty <= 0 || state.unitPrice <= 0) {
@@ -50,6 +54,7 @@ class SalesOrderCaptureCubit extends Cubit<SalesOrderCaptureState> {
       final orderId = await repository.captureSalesOrder(
         agentId: state.agentId,
         plantId: state.plantId,
+        customerId: state.customerId,
         lines: [OrderLineInput(skuId: _devOrderSkuId, orderedQty: state.orderedQty, unitPrice: state.unitPrice)],
       );
       emit(state.copyWith(status: SalesOrderCaptureStatus.submitted, submittedOrderId: orderId));

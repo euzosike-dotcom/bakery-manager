@@ -55,9 +55,18 @@ export class ActivitiesService {
     return { clientEventId, status: 'ACKED', serverEntityId: activityId, message: 'Activity logged.' };
   }
 
-  findAll(tenantId: string) {
-    return this.prisma.forTenant(tenantId, (tx) =>
+  async findAll(tenantId: string) {
+    const rows = await this.prisma.forTenant(tenantId, (tx) =>
       tx.activity.findMany({ where: { tenantId }, orderBy: { activityDate: 'desc' } }),
     );
+    // Prisma maps the bigserial sync_seq column to a native JS BigInt,
+    // which JSON.stringify (and therefore Nest's default response
+    // serializer) cannot handle — throws at response-send time, not at
+    // compile time. Every other service's equivalent gotcha only ever
+    // showed up on the $queryRaw-based /sync/pull path (sanitized there by
+    // each service's own `serializeBigInts` helper); this is the first GET
+    // endpoint anywhere in the platform returning a Prisma-typed entity
+    // with a BigInt column directly, so the same fix is needed here too.
+    return rows.map((r) => ({ ...r, syncSeq: r.syncSeq?.toString() ?? null }));
   }
 }

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/database/database.dart';
@@ -32,6 +33,7 @@ class SalesOrderRepository {
     required String agentId,
     required String plantId,
     required List<OrderLineInput> lines,
+    String? customerId,
   }) async {
     final salesOrderId = _uuid.v4();
     final clientEventId = _uuid.v4();
@@ -46,6 +48,7 @@ class SalesOrderRepository {
               orderNumber: orderNumber,
               agentId: agentId,
               plantId: plantId,
+              customerId: Value(customerId),
               orderDate: orderDate,
               totalOrderValue: totalOrderValue,
               clientEventId: clientEventId,
@@ -57,6 +60,7 @@ class SalesOrderRepository {
         'orderNumber': orderNumber,
         'agentId': agentId,
         'plantId': plantId,
+        if (customerId != null) 'customerId': customerId,
         'orderDate': orderDate.toIso8601String(),
         'clientEventId': clientEventId,
         'deviceId': deviceId,

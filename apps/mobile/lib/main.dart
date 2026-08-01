@@ -19,6 +19,9 @@ import 'features/sales_order/presentation/sales_order_capture_screen.dart';
 import 'features/ncr/cubit/ncr_submission_cubit.dart';
 import 'features/ncr/data/ncr_repository.dart';
 import 'features/ncr/presentation/ncr_submission_screen.dart';
+import 'features/activity/cubit/activity_capture_cubit.dart';
+import 'features/activity/data/activity_repository.dart';
+import 'features/activity/presentation/activity_capture_screen.dart';
 
 // Dev-only defaults for the vertical slice (docs/RUNBOOK.md). Production
 // wiring replaces these with real tenant discovery (subdomain/invite-code,
@@ -31,6 +34,7 @@ const _devTenantId = 'b17d9226-2a43-43eb-8c5e-a923637b23c5';
 const _devProcurementBaseUrl = 'http://localhost:3001';
 const _devManufacturingBaseUrl = 'http://localhost:3002';
 const _devSalesBaseUrl = 'http://localhost:3003';
+const _devCrmBaseUrl = 'http://localhost:3005';
 const _devWarehouseId = '7840f37a-13eb-4779-aa16-84bf10f7d351'; // WH-PLT1-RM, see infra/postgres/seed/dev_seed.sql
 
 void main() {
@@ -49,6 +53,7 @@ class _MetrockAppState extends State<MetrockApp> {
   late final ApiClient _procurementApi;
   late final ApiClient _manufacturingApi;
   late final ApiClient _salesApi;
+  late final ApiClient _crmApi;
   late final SyncService _sync;
   final String _deviceId = const Uuid().v4();
 
@@ -59,10 +64,12 @@ class _MetrockAppState extends State<MetrockApp> {
     _procurementApi = ApiClient(baseUrl: _devProcurementBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _manufacturingApi = ApiClient(baseUrl: _devManufacturingBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _salesApi = ApiClient(baseUrl: _devSalesBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
+    _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _sync = SyncService(db: _db, apiClients: {
       SyncModule.procurement: _procurementApi,
       SyncModule.manufacturing: _manufacturingApi,
       SyncModule.sales: _salesApi,
+      SyncModule.crm: _crmApi,
     })
       ..startWatchingConnectivity();
   }
@@ -84,6 +91,7 @@ class _MetrockAppState extends State<MetrockApp> {
         procurementApi: _procurementApi,
         manufacturingApi: _manufacturingApi,
         salesApi: _salesApi,
+        crmApi: _crmApi,
         deviceId: _deviceId,
         sync: _sync,
       ),
@@ -103,6 +111,7 @@ class _HomeScreen extends StatelessWidget {
     required this.procurementApi,
     required this.manufacturingApi,
     required this.salesApi,
+    required this.crmApi,
     required this.deviceId,
     required this.sync,
   });
@@ -111,17 +120,20 @@ class _HomeScreen extends StatelessWidget {
   final ApiClient procurementApi;
   final ApiClient manufacturingApi;
   final ApiClient salesApi;
+  final ApiClient crmApi;
   final String deviceId;
   final SyncService sync;
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Metrock ERP'),
-          bottom: const TabBar(tabs: [Tab(text: 'Purchase Orders'), Tab(text: 'Recipes'), Tab(text: 'Agents')]),
+          bottom: const TabBar(
+            tabs: [Tab(text: 'Purchase Orders'), Tab(text: 'Recipes'), Tab(text: 'Agents'), Tab(text: 'Customers')],
+          ),
           actions: [
             IconButton(icon: const Icon(Icons.sync), onPressed: sync.syncNow, tooltip: 'Sync now'),
           ],
@@ -130,7 +142,8 @@ class _HomeScreen extends StatelessWidget {
           children: [
             _PurchaseOrdersTab(db: db, api: procurementApi, deviceId: deviceId, sync: sync),
             _RecipesTab(db: db, api: manufacturingApi, deviceId: deviceId, sync: sync),
-            _AgentsTab(db: db, api: salesApi, deviceId: deviceId, sync: sync),
+            _AgentsTab(db: db, api: salesApi, crmApi: crmApi, deviceId: deviceId, sync: sync),
+            _CustomersTab(db: db, api: crmApi, deviceId: deviceId, sync: sync),
           ],
         ),
       ),
@@ -319,9 +332,10 @@ class _RecipesTabState extends State<_RecipesTab> {
 const _devPlantIdFallback = 'aba294c3-c28c-43a9-a465-67ced442a487';
 
 class _AgentsTab extends StatefulWidget {
-  const _AgentsTab({required this.db, required this.api, required this.deviceId, required this.sync});
+  const _AgentsTab({required this.db, required this.api, required this.crmApi, required this.deviceId, required this.sync});
   final AppDatabase db;
   final ApiClient api;
+  final ApiClient crmApi;
   final String deviceId;
   final SyncService sync;
 
@@ -373,7 +387,7 @@ class _AgentsTabState extends State<_AgentsTab> {
     Navigator.of(context)
         .push(
           MaterialPageRoute(
-            builder: (_) => _AgentDetailScreen(db: widget.db, deviceId: widget.deviceId, agent: agent),
+            builder: (_) => _AgentDetailScreen(db: widget.db, crmApi: widget.crmApi, deviceId: widget.deviceId, agent: agent),
           ),
         )
         .then((_) => widget.sync.syncNow());
@@ -383,14 +397,36 @@ class _AgentsTabState extends State<_AgentsTab> {
 /// Landing point for the two agent-scoped actions this slice implements —
 /// mirrors how a real app would likely group "things you can do for this
 /// agent" rather than exposing New Order / Submit NCR as top-level tabs.
-class _AgentDetailScreen extends StatelessWidget {
-  const _AgentDetailScreen({required this.db, required this.deviceId, required this.agent});
+/// Fetches the customer list once (same online-only simplification as
+/// every other master-data list in this app) so New Sales Order can offer
+/// an optional customer picker (CRM slice) without a fourth `ApiClient`
+/// being threaded any deeper than this screen needs it.
+class _AgentDetailScreen extends StatefulWidget {
+  const _AgentDetailScreen({required this.db, required this.crmApi, required this.deviceId, required this.agent});
   final AppDatabase db;
+  final ApiClient crmApi;
   final String deviceId;
   final Map<String, dynamic> agent;
 
   @override
+  State<_AgentDetailScreen> createState() => _AgentDetailScreenState();
+}
+
+class _AgentDetailScreenState extends State<_AgentDetailScreen> {
+  List<Map<String, dynamic>> _customers = [];
+
+  @override
+  void initState() {
+    super.initState();
+    widget.crmApi.fetchCustomers().then((c) => setState(() => _customers = c)).catchError((_) {
+      // Offline at open, or crm-service unreachable — New Sales Order still
+      // works, just with an empty customer picker (defaults to "None").
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final agent = widget.agent;
     final availableCapital = double.parse(agent['availableCapital'].toString());
     return Scaffold(
       appBar: AppBar(title: Text(agent['agentName'] as String)),
@@ -407,10 +443,11 @@ class _AgentDetailScreen extends StatelessWidget {
                 MaterialPageRoute(
                   builder: (_) => BlocProvider(
                     create: (_) => SalesOrderCaptureCubit(
-                      repository: SalesOrderRepository(db: db, deviceId: deviceId),
+                      repository: SalesOrderRepository(db: widget.db, deviceId: widget.deviceId),
                       agentId: agent['agentId'] as String,
                       plantId: _devPlantIdFallback,
                       availableCapitalAtOpen: availableCapital,
+                      customers: _customers,
                     ),
                     child: const SalesOrderCaptureScreen(),
                   ),
@@ -424,7 +461,7 @@ class _AgentDetailScreen extends StatelessWidget {
                 MaterialPageRoute(
                   builder: (_) => BlocProvider(
                     create: (_) => NcrSubmissionCubit(
-                      repository: NcrRepository(db: db, deviceId: deviceId),
+                      repository: NcrRepository(db: widget.db, deviceId: widget.deviceId),
                       agentId: agent['agentId'] as String,
                     ),
                     child: const NcrSubmissionScreen(),
@@ -432,6 +469,113 @@ class _AgentDetailScreen extends StatelessWidget {
                 ),
               ),
               child: const Text('Submit Cash Collection (NCR)'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Fourth tab (CRM slice): Customers list, fetched directly online — same
+/// simplification as Purchase Orders/Recipes/Agents (see ActivitiesLocal's
+/// doc comment). Tapping a customer opens a detail screen with the one
+/// offline-capturable CRM action: logging an Activity.
+class _CustomersTab extends StatefulWidget {
+  const _CustomersTab({required this.db, required this.api, required this.deviceId, required this.sync});
+  final AppDatabase db;
+  final ApiClient api;
+  final String deviceId;
+  final SyncService sync;
+
+  @override
+  State<_CustomersTab> createState() => _CustomersTabState();
+}
+
+class _CustomersTabState extends State<_CustomersTab> {
+  List<Map<String, dynamic>>? _customers;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final customers = await widget.api.fetchCustomers();
+      setState(() => _customers = customers);
+    } catch (e) {
+      setState(() => _loadError = 'Could not reach server (offline?): $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadError != null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!)));
+    }
+    if (_customers == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return ListView.builder(
+      itemCount: _customers!.length,
+      itemBuilder: (context, index) {
+        final customer = _customers![index];
+        return ListTile(
+          title: Text(customer['customerName'] as String),
+          subtitle: Text('${customer['customerCode']} · ${customer['customerStatus']}'),
+          onTap: () => _openCustomerDetail(customer),
+        );
+      },
+    );
+  }
+
+  void _openCustomerDetail(Map<String, dynamic> customer) {
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => _CustomerDetailScreen(db: widget.db, deviceId: widget.deviceId, customer: customer),
+          ),
+        )
+        .then((_) => widget.sync.syncNow());
+  }
+}
+
+/// Landing point for the one CRM action this slice implements: logging an
+/// Activity against a customer. Mirrors _AgentDetailScreen's structure.
+class _CustomerDetailScreen extends StatelessWidget {
+  const _CustomerDetailScreen({required this.db, required this.deviceId, required this.customer});
+  final AppDatabase db;
+  final String deviceId;
+  final Map<String, dynamic> customer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(customer['customerName'] as String)),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('${customer['customerCode']} · ${customer['customerType']} · ${customer['customerStatus']}',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => BlocProvider(
+                    create: (_) => ActivityCaptureCubit(
+                      repository: ActivityRepository(db: db, deviceId: deviceId),
+                      customerId: customer['customerId'] as String,
+                    ),
+                    child: const ActivityCaptureScreen(),
+                  ),
+                ),
+              ),
+              child: const Text('Log Activity'),
             ),
           ],
         ),

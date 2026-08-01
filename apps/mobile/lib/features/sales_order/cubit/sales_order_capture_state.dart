@@ -8,6 +8,8 @@ class SalesOrderCaptureState extends Equatable {
     required this.agentId,
     required this.plantId,
     required this.availableCapitalAtOpen,
+    required this.customers,
+    this.customerId,
     this.orderedQty = 0,
     this.unitPrice = 0,
     this.errorMessage,
@@ -21,6 +23,12 @@ class SalesOrderCaptureState extends Equatable {
   // SalesOrderCaptureCubit's doc comment: the server re-checks live,
   // regardless of what this was when the screen opened.
   final double availableCapitalAtOpen;
+  // Fetched once by the caller (see main.dart's _AgentDetailScreen), same
+  // online-only simplification as every other master-data list in this
+  // app — not re-fetched here. Optional: NULL means "no CRM customer
+  // recorded for this order", which is a fully valid choice.
+  final List<Map<String, dynamic>> customers;
+  final String? customerId;
   final double orderedQty;
   final double unitPrice;
   final String? errorMessage;
@@ -31,6 +39,8 @@ class SalesOrderCaptureState extends Equatable {
 
   SalesOrderCaptureState copyWith({
     SalesOrderCaptureStatus? status,
+    String? customerId,
+    bool clearCustomerId = false,
     double? orderedQty,
     double? unitPrice,
     String? errorMessage,
@@ -41,6 +51,8 @@ class SalesOrderCaptureState extends Equatable {
         agentId: agentId,
         plantId: plantId,
         availableCapitalAtOpen: availableCapitalAtOpen,
+        customers: customers,
+        customerId: clearCustomerId ? null : (customerId ?? this.customerId),
         orderedQty: orderedQty ?? this.orderedQty,
         unitPrice: unitPrice ?? this.unitPrice,
         errorMessage: errorMessage,
@@ -53,6 +65,8 @@ class SalesOrderCaptureState extends Equatable {
         agentId,
         plantId,
         availableCapitalAtOpen,
+        customers,
+        customerId,
         orderedQty,
         unitPrice,
         errorMessage,

@@ -15,13 +15,14 @@ import 'api_client.dart';
 /// before), so the client does the routing itself for now, one entry per
 /// module. Adding a module means adding one entry here, not restructuring
 /// this class.
-enum SyncModule { procurement, manufacturing, sales }
+enum SyncModule { procurement, manufacturing, sales, crm }
 
 const _pushModuleForEntityType = {
   'goods_receipt': SyncModule.procurement,
   'production_batch': SyncModule.manufacturing,
   'sales_order': SyncModule.sales,
   'ncr_collection': SyncModule.sales,
+  'activity': SyncModule.crm,
 };
 
 const _pullModuleForEntity = {
@@ -30,6 +31,7 @@ const _pullModuleForEntity = {
   'production_batches': SyncModule.manufacturing,
   'sales_orders': SyncModule.sales,
   'ncr_collections': SyncModule.sales,
+  'activities': SyncModule.crm,
 };
 
 /// Drives both directions of SDD §2.2:
@@ -73,6 +75,7 @@ class SyncService {
       await _pullEntity('production_batches');
       await _pullEntity('sales_orders');
       await _pullEntity('ncr_collections');
+      await _pullEntity('activities');
     } finally {
       _running = false;
     }
@@ -168,6 +171,8 @@ class SyncService {
           await _applySalesOrdersPage(page.records);
         case 'ncr_collections':
           await _applyNcrCollectionsPage(page.records);
+        case 'activities':
+          await _applyActivitiesPage(page.records);
       }
 
       await _writeCursor(entity, page.nextCursor);
@@ -209,11 +214,11 @@ class SyncService {
             grnLineId: row['grn_line_id'] as String,
             grnId: row['grn_id'] as String,
             poLineId: row['po_line_id'] as String,
-            receivedQty: (row['received_qty'] as num).toDouble(),
-            acceptedQty: (row['accepted_qty'] as num).toDouble(),
-            rejectedQty: (row['rejected_qty'] as num).toDouble(),
+            receivedQty: double.parse(row['received_qty'].toString()),
+            acceptedQty: double.parse(row['accepted_qty'].toString()),
+            rejectedQty: double.parse(row['rejected_qty'].toString()),
             uom: row['uom'] as String,
-            unitCost: (row['unit_cost'] as num).toDouble(),
+            unitCost: double.parse(row['unit_cost'].toString()),
           ),
           mode: InsertMode.insertOrReplace,
         );
@@ -233,10 +238,10 @@ class SyncService {
             skuId: row['sku_id'] as String,
             recipeVersionId: row['recipe_version_id'] as String,
             batchDate: DateTime.parse(row['batch_date'] as String),
-            plannedQty: (row['planned_qty'] as num).toDouble(),
-            actualOutputQty: (row['actual_output_qty'] as num).toDouble(),
-            actualWasteQty: (row['actual_waste_qty'] as num).toDouble(),
-            yieldPercent: Value(row['yield_percent'] == null ? null : (row['yield_percent'] as num).toDouble()),
+            plannedQty: double.parse(row['planned_qty'].toString()),
+            actualOutputQty: double.parse(row['actual_output_qty'].toString()),
+            actualWasteQty: double.parse(row['actual_waste_qty'].toString()),
+            yieldPercent: Value(row['yield_percent'] == null ? null : double.parse(row['yield_percent'].toString())),
             yieldAlertTriggered: Value(row['yield_alert_triggered'] as bool),
             batchStatus: Value(row['batch_status'] as String),
             clientEventId: row['client_event_id'] as String,
@@ -259,6 +264,7 @@ class SyncService {
             orderNumber: row['order_number'] as String,
             agentId: row['agent_id'] as String,
             plantId: row['plant_id'] as String,
+            customerId: Value(row['customer_id'] as String?),
             orderDate: DateTime.parse(row['order_date'] as String),
             totalOrderValue: double.parse(row['total_order_value'].toString()),
             orderStatus: Value(row['order_status'] as String),
@@ -285,6 +291,27 @@ class SyncService {
             collectionDate: DateTime.parse(row['collection_date'] as String),
             amount: double.parse(row['amount'].toString()),
             verifiedFlag: Value(row['verified_flag'] as bool),
+            clientEventId: row['client_event_id'] as String,
+            createdOffline: Value(row['created_offline'] as bool),
+            syncSeq: Value(int.parse(row['sync_seq'].toString())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  Future<void> _applyActivitiesPage(List<Map<String, dynamic>> rows) async {
+    await db.batch((batch) {
+      for (final row in rows) {
+        batch.insert(
+          db.activitiesLocal,
+          ActivitiesLocalCompanion.insert(
+            activityId: row['activity_id'] as String,
+            customerId: row['customer_id'] as String,
+            activityType: row['activity_type'] as String,
+            notes: Value(row['notes'] as String?),
+            activityDate: DateTime.parse(row['activity_date'] as String),
             clientEventId: row['client_event_id'] as String,
             createdOffline: Value(row['created_offline'] as bool),
             syncSeq: Value(int.parse(row['sync_seq'].toString())),

@@ -4,7 +4,7 @@ Multi-tenant, offline-first ERP platform for food manufacturing enterprises.
 Metrock Enterprises is Tenant Zero. Full architecture: see
 [`docs/SDD.md`](docs/SDD.md) (copied from the System Design Documentation).
 
-## Status: Five modules built — Procurement GRN, Manufacturing/Yield, and Sales & Agent Capital verified end-to-end; Accounting and CRM verified on the backend, Flutter UI not yet added
+## Status: Five modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital, Accounting, and CRM
 
 This repo implements **five modules**, each proving the architecture
 before scaling out to the remaining original-PRD modules (Logistics/Fleet,
@@ -70,7 +70,7 @@ infra/
   postgres/migrations/   # SQL migrations, RLS policies
   docker-compose.yml     # Postgres, Redpanda, Redis, MinIO for local dev
 apps/
-  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR capture client (no Accounting/CRM screens yet)
+  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR/activity capture client
 docs/
   SDD.md                 # Full system design documentation
   RUNBOOK.md             # Verified bring-up + verification trail for every module
@@ -123,14 +123,16 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   needing conditional logic by using two event types (favorable/
   unfavorable) instead; a module that genuinely needs conditional posting
   logic will need this implemented for real.
-- **No Flutter UI for Accounting or CRM yet.** Both modules were built and
-  verified via curl directly against the running services, not through the
-  mobile app — the only slice so far NOT proven on-device on the iOS
-  Simulator. Accounting has no offline-capturable entity by design (bill/
-  invoice payment recording is an inherently connected back-office action,
-  same scope decision as Sales's NCR verification step); CRM's Activities
-  screen and a customer picker on the existing Sales Order capture screen
-  are the two pieces still needed.
+- **Accounting has no Flutter UI** — by design, not an oversight. Bill/
+  invoice payment recording is an inherently connected back-office action
+  (same scope decision as Sales's NCR verification step), so there's no
+  offline-capturable entity for it to add to the sync engine. CRM's
+  Activities screen (offline-capturable) and the Sales Order customer
+  picker both exist and are proven on-device — see `docs/RUNBOOK.md`'s
+  "Vertical Slice #4" §6 for the real kill-the-backend verification,
+  including two real bugs it surfaced and fixed (a numeric-as-string
+  cast bug in two of the Procurement/Manufacturing pull handlers, and a
+  BigInt-JSON-serialization bug in crm-service's Activities list endpoint).
 - **NCR-based and invoice-payment-based AR recovery are unreconciled**: a
   Sales NCR verification and an Accounting Customer Invoice payment both
   credit the same GL account (1210, Agent Wallet / Trading Capital

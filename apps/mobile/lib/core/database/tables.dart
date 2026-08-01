@@ -106,6 +106,9 @@ class SalesOrdersLocal extends Table {
   TextColumn get orderNumber => text()();
   TextColumn get agentId => text()();
   TextColumn get plantId => text()();
+  // Optional CRM link (migration 012_crm.sql), added in the CRM slice —
+  // see SalesOrderRepository.captureSalesOrder's doc comment.
+  TextColumn get customerId => text().nullable()();
   DateTimeColumn get orderDate => dateTime()();
   RealColumn get totalOrderValue => real()();
   TextColumn get orderStatus => text().withDefault(const Constant('CONFIRMED'))();
@@ -156,6 +159,28 @@ class OutboxEvents extends Table {
 
   @override
   Set<Column> get primaryKey => {clientEventId};
+}
+
+/// Local mirror of `activities` (migration 012_crm.sql) — the CRM module's
+/// one offline-capturable entity (a field rep logging a call/visit/note
+/// against a customer), same offline-write / reconcile-on-pull pattern as
+/// NcrCollectionsLocal. Customers/Opportunities have no local table at all
+/// — same "fetched directly online, held in memory only" simplification as
+/// Purchase Orders/Recipes/Agents (see README "Known gaps"), so there's
+/// nothing to pick a customer against until the device has been online at
+/// least once.
+class ActivitiesLocal extends Table {
+  TextColumn get activityId => text()(); // client-generated UUID
+  TextColumn get customerId => text()();
+  TextColumn get activityType => text()();
+  TextColumn get notes => text().nullable()();
+  DateTimeColumn get activityDate => dateTime()();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {activityId};
 }
 
 /// Per-table pull cursor (SDD §2.2: "client persists last_synced_cursor per

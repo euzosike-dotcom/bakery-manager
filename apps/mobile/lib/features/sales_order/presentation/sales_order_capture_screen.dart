@@ -45,6 +45,21 @@ class SalesOrderCaptureScreen extends StatelessWidget {
                       'This is a snapshot for guidance only — the server re-checks live capital when this syncs.',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String?>(
+                      initialValue: state.customerId,
+                      decoration: const InputDecoration(labelText: 'Customer (optional)'),
+                      items: [
+                        const DropdownMenuItem<String?>(value: null, child: Text('None')),
+                        ...state.customers.map(
+                          (c) => DropdownMenuItem<String?>(
+                            value: c['customerId'] as String,
+                            child: Text(c['customerName'] as String),
+                          ),
+                        ),
+                      ],
+                      onChanged: (v) => context.read<SalesOrderCaptureCubit>().updateCustomerId(v),
+                    ),
                     const SizedBox(height: 24),
                     TextFormField(
                       decoration: const InputDecoration(labelText: 'Ordered quantity (units)'),

@@ -983,18 +983,79 @@ module), including a replayed push of the same `clientEventId` correctly
 returning "Already applied" with the same `serverEntityId` rather than a
 duplicate row.
 
+## 6. Flutter: Customers tab, Activity logging, and the Sales Order customer picker
+
+Fourth tab (`_CustomersTab`), fetched directly online via a new
+`ApiClient.fetchCustomers()` — same "no local cache table" simplification
+as Purchase Orders/Recipes/Agents (a device needs connectivity at least
+once before a customer can be picked; only the capture action itself works
+fully offline afterward). Tapping a customer opens `_CustomerDetailScreen`
+with the one CRM action this slice implements: **Log Activity**
+(`ActivityCaptureCubit`/`ActivityRepository`), CRM's one offline-
+capturable entity — new `ActivitiesLocal` Drift table (schema v3 -> v4),
+new `SyncModule.crm` entry, `'activity'` push / `'activities'` pull
+routing in `sync_service.dart`.
+
+The Sales Order capture screen gained an optional Customer dropdown
+(`SalesOrderCaptureState.customerId`, `SalesOrderCaptureCubit
+.updateCustomerId`) — `SalesOrdersLocal` gained a nullable `customerId`
+column (schema v3 -> v4, via `m.addColumn`, not `m.createTable`, since this
+table already existed) and the outbox payload now includes `customerId`
+when set.
+
+**Proven exactly like Slices #1–#3** — real device, real kill-the-backend:
+
+1. Customers tab lists both the seeded customer and one created earlier
+   via curl in this same session — confirms the tab reads real server
+   state, not fixture data.
+2. **Killed `crm-service` entirely.** Tapped a customer -> Log Activity ->
+   filled in type + notes -> Save. "Saved locally..." — confirmed directly
+   in the device's SQLite file (`sqlite3 .../metrock_erp.sqlite`) that the
+   `activities` outbox row existed with `sync_status = 'PENDING'` before
+   the backend ever came back up.
+3. Restarted `crm-service`, tapped sync. Outbox row flipped to `ACKED`;
+   `GET /activities` on the backend confirmed the exact same
+   `client_event_id` with `created_offline = true`.
+4. New Sales Order screen: picked "Sunrise Retail Stores" from the new
+   customer dropdown, entered qty/price. **Killed `sales-service`
+   entirely.** Saved — "Saved locally...". Restarted `sales-service`,
+   synced — order landed with `customer_id` set and `created_offline =
+   true`, exactly as scenario #7 (Slice #3) requires for every other
+   field on this same order. accounting-service's Kafka consumer then
+   auto-raised a `2500`-total `OPEN` Customer Invoice against that order —
+   the full five-module chain (Flutter capture -> Sales order ->
+   Kafka -> Accounting auto-invoice) working from a single offline tap.
+
+**Two real bugs found and fixed during this pass** (both in code that
+predates this slice, surfaced only now because this was the first time
+`syncNow()` ran against a database with real accumulated numeric data from
+every prior slice's testing):
+
+- **Bug #9 — `_applyGoodsReceiptLinesPage`/`_applyProductionBatchesPage`
+  cast pulled numeric fields as `(row[x] as num).toDouble()`**, which
+  throws `type 'String' is not a subtype of type 'num'` because the
+  backend's `$queryRaw` path returns Postgres `numeric` columns as JSON
+  strings (node-pg's default type parser), not JS numbers — exactly the
+  class of bug `_applySalesOrdersPage`/`_applyNcrCollectionsPage` had
+  already worked around with `double.parse(row[x].toString())`. The GRN/
+  batch pull functions were just never fixed to match. This wasn't
+  cosmetic: an unhandled exception here aborted the rest of `syncNow()`'s
+  pull sequence, which meant the new `activities` pull (added at the end
+  of that sequence) never ran either — this one bug was blocking CRM
+  verification entirely until fixed. Fix: same `double.parse(...toString())`
+  pattern, applied to both functions.
+- **Bug #10 — `ActivitiesService.findAll()` (crm-service) returns
+  Prisma's native `bigint` for `sync_seq` directly to `GET /activities`**,
+  which Express's `JSON.stringify` cannot serialize (`Do not know how to
+  serialize a BigInt`) — a 500 on every call. Every other module's
+  identical gotcha only ever showed up on the `$queryRaw`-based `/sync/
+  pull` path (each service already has its own `serializeBigInts` helper
+  there); this is the first GET endpoint anywhere in the platform
+  returning a Prisma-typed entity with a `BigInt` column directly, so nothing
+  existing caught it. Fix: map `syncSeq` to a string before returning.
+
 ## Known gaps still open after this pass (Accounting & CRM)
 
-- **No Flutter UI yet for either module.** Everything above was verified
-  via curl against the running services, not through the mobile app —
-  unlike Slices #1–#3, this pass has NOT been proven on-device on the iOS
-  Simulator (no kill-the-backend offline test performed for Accounting or
-  CRM). Accounting has no offline-capturable entity by design (bill/
-  invoice payment recording is inherently a connected back-office action,
-  same scope decision as NCR verification in Slice #3), so there's nothing
-  to add to the sync engine for it. CRM's Activities screen + a customer
-  picker on the existing Sales Order capture screen are the two pieces
-  still needed before this slice can be called fully proven end-to-end.
 - **NCR-based and invoice-payment-based AR recovery are unreconciled** —
   flagged in migration 014's header comment when the schema was designed:
   both a Sales NCR verification and a Customer Invoice payment credit the
