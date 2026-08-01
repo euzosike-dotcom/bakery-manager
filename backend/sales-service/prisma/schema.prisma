@@ -69,12 +69,26 @@ model TradingCapitalLedger {
   @@map("trading_capital_ledger")
 }
 
+// Read-only from this service's perspective — owned by crm-service's
+// migration (012_crm.sql). sales-service only needs it to validate an
+// optional customerId on order creation, same pattern as ProductSku above.
+model Customer {
+  tenantId   String @map("tenant_id") @db.Uuid
+  customerId String @map("customer_id") @db.Uuid
+
+  salesOrders SalesOrder[]
+
+  @@id([tenantId, customerId])
+  @@map("customers")
+}
+
 model SalesOrder {
   tenantId                String   @map("tenant_id") @db.Uuid
   salesOrderId            String   @map("sales_order_id") @db.Uuid
   orderNumber             String   @map("order_number")
   agentId                 String   @map("agent_id") @db.Uuid
   plantId                 String   @map("plant_id") @db.Uuid
+  customerId              String?  @map("customer_id") @db.Uuid
   orderDate               DateTime @map("order_date")
   totalOrderValue         Decimal  @map("total_order_value") @db.Decimal(14, 2)
   orderStatus             String   @map("order_status")
@@ -85,8 +99,9 @@ model SalesOrder {
   syncSeq                 BigInt   @map("sync_seq")
   createdAt               DateTime @map("created_at")
 
-  agent AgentMaster  @relation(fields: [tenantId, agentId], references: [tenantId, agentId])
-  lines OrderLine[]
+  agent    AgentMaster  @relation(fields: [tenantId, agentId], references: [tenantId, agentId])
+  customer Customer?    @relation(fields: [tenantId, customerId], references: [tenantId, customerId])
+  lines    OrderLine[]
 
   @@id([tenantId, salesOrderId])
   @@unique([tenantId, clientEventId])

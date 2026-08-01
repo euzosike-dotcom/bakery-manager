@@ -55,6 +55,13 @@ export class SalesService {
       const agent = await tx.agentMaster.findUnique({ where: { tenantId_agentId: { tenantId, agentId: dto.agentId } } });
       if (!agent) throw new NotFoundException(`Agent ${dto.agentId} not found`);
 
+      if (dto.customerId) {
+        const customer = await tx.customer.findUnique({
+          where: { tenantId_customerId: { tenantId, customerId: dto.customerId } },
+        });
+        if (!customer) throw new NotFoundException(`Customer ${dto.customerId} not found`);
+      }
+
       // Live computation, inside this transaction — see class doc comment.
       const aggregate = await tx.tradingCapitalLedger.aggregate({
         where: { tenantId, agentId: dto.agentId },
@@ -70,11 +77,12 @@ export class SalesService {
 
       await tx.$executeRaw`
         INSERT INTO sales_orders (
-          tenant_id, sales_order_id, order_number, agent_id, plant_id, order_date,
+          tenant_id, sales_order_id, order_number, agent_id, plant_id, customer_id, order_date,
           total_order_value, order_status, credit_eligibility_status,
           client_event_id, device_id, created_offline
         ) VALUES (
           ${tenantId}::uuid, ${salesOrderId}::uuid, ${dto.orderNumber}, ${dto.agentId}::uuid, ${dto.plantId}::uuid,
+          ${dto.customerId ?? null}::uuid,
           ${dto.orderDate ? new Date(dto.orderDate) : new Date()}, ${totalOrderValue}, ${orderStatus},
           ${creditEligibilityStatus}, ${clientEventId}::uuid, ${dto.deviceId ?? null}::uuid, ${options.createdOffline}
         )

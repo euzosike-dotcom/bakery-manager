@@ -1,0 +1,88 @@
+// Prisma schema for the CRM domain service. Mirrors
+// infra/postgres/migrations/012_crm.sql — see procurement-service/prisma/
+// schema.prisma's header comment for why this is generate-only, not the
+// migration source of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Read-only — owned by 003_governance.sql, reused here only to validate an
+// optional plantId on customer creation, same cross-module reuse pattern as
+// sales-service's ProductSku.
+model Plant {
+  tenantId  String @map("tenant_id") @db.Uuid
+  plantId   String @map("plant_id") @db.Uuid
+  plantCode String @map("plant_code")
+
+  customers Customer[]
+
+  @@id([tenantId, plantId])
+  @@map("plants")
+}
+
+model Customer {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  customerId     String   @map("customer_id") @db.Uuid
+  customerCode   String   @map("customer_code")
+  customerName   String   @map("customer_name")
+  customerType   String   @map("customer_type")
+  contactPerson  String?  @map("contact_person")
+  phone          String?
+  email          String?
+  address        String?
+  plantId        String?  @map("plant_id") @db.Uuid
+  customerStatus String   @map("customer_status")
+  createdAt      DateTime @map("created_at")
+
+  plant         Plant?         @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  opportunities Opportunity[]
+  activities    Activity[]
+
+  @@id([tenantId, customerId])
+  @@unique([tenantId, customerCode])
+  @@map("customers")
+}
+
+model Opportunity {
+  tenantId          String    @map("tenant_id") @db.Uuid
+  opportunityId     String    @map("opportunity_id") @db.Uuid
+  customerId        String    @map("customer_id") @db.Uuid
+  opportunityName   String    @map("opportunity_name")
+  stage             String
+  estimatedValue    Decimal?  @map("estimated_value") @db.Decimal(14, 2)
+  expectedCloseDate DateTime? @map("expected_close_date") @db.Date
+  ownerUserId       String?   @map("owner_user_id") @db.Uuid
+  createdAt         DateTime  @map("created_at")
+
+  customer Customer @relation(fields: [tenantId, customerId], references: [tenantId, customerId])
+
+  @@id([tenantId, opportunityId])
+  @@map("opportunities")
+}
+
+model Activity {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  activityId      String   @map("activity_id") @db.Uuid
+  customerId      String   @map("customer_id") @db.Uuid
+  activityType    String   @map("activity_type")
+  notes           String?
+  activityDate    DateTime @map("activity_date")
+  createdByUserId String?  @map("created_by_user_id") @db.Uuid
+  clientEventId   String   @map("client_event_id") @db.Uuid
+  deviceId        String?  @map("device_id") @db.Uuid
+  createdOffline  Boolean  @map("created_offline")
+  syncSeq         BigInt   @map("sync_seq")
+  createdAt       DateTime @map("created_at")
+
+  customer Customer @relation(fields: [tenantId, customerId], references: [tenantId, customerId])
+
+  @@id([tenantId, activityId])
+  @@unique([tenantId, clientEventId])
+  @@map("activities")
+}

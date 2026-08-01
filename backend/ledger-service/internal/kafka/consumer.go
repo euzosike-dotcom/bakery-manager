@@ -97,6 +97,8 @@ func sourceModuleFor(eventType string) string {
 		return "manufacturing"
 	case "sales.order_fulfilled.v1", "ncr.verified.v1":
 		return "sales"
+	case "accounting.bill_paid.v1", "accounting.invoice_payment_received.v1":
+		return "accounting"
 	default:
 		return "unknown"
 	}

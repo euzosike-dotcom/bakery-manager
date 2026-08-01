@@ -4,11 +4,11 @@ Multi-tenant, offline-first ERP platform for food manufacturing enterprises.
 Metrock Enterprises is Tenant Zero. Full architecture: see
 [`docs/SDD.md`](docs/SDD.md) (copied from the System Design Documentation).
 
-## Status: Three modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital
+## Status: Five modules built — Procurement GRN, Manufacturing/Yield, and Sales & Agent Capital verified end-to-end; Accounting and CRM verified on the backend, Flutter UI not yet added
 
-This repo implements **three modules end-to-end**, each proving the
-architecture before scaling out to the remaining three (Logistics/Fleet,
-HR/Payroll, Governance):
+This repo implements **five modules**, each proving the architecture
+before scaling out to the remaining original-PRD modules (Logistics/Fleet,
+HR/Payroll, Governance) or further platform extensions:
 
 ```
 Flutter (offline capture: GRN / production batch / sales order / NCR)
@@ -25,20 +25,33 @@ Flutter (offline capture: GRN / production batch / sales order / NCR)
 | Procurement & Stores | `backend/procurement-service` | 3001 | `grn.posted.v1` -> Dr Raw Material Inventory / Cr Accounts Payable |
 | Manufacturing & Yield | `backend/manufacturing-service` | 3002 | `batch.consumption_recorded.v1` -> Dr WIP / Cr Raw Material Inventory; `batch.output_recorded.v1` -> Dr Finished Goods / Cr WIP; `batch.yield_variance_(un)favorable.v1` -> WIP <-> Manufacturing Variance Expense |
 | Sales & Agent Capital | `backend/sales-service` | 3003 | `sales.order_fulfilled.v1` -> Dr Agent Wallet/Trading Capital Receivable / Cr Sales Revenue; `ncr.verified.v1` -> Dr Cash and Bank / Cr Agent Wallet |
+| Accounting (Zoho Books/QuickBooks equivalent) | `backend/accounting-service` | 3004 | `accounting.bill_paid.v1` -> Dr Accounts Payable / Cr Cash and Bank; `accounting.invoice_payment_received.v1` -> Dr Cash and Bank / Cr Agent Wallet |
+| CRM | `backend/crm-service` | 3005 | none — no financial postings, integrates via `sales_orders.customer_id` |
 
-All three domain services share the exact same pattern: tenant-context
-middleware + Kafka producer + Prisma tenant-scoping helper (extracted into
+All five domain services share the exact same pattern: tenant-context
+middleware + Prisma tenant-scoping helper (extracted into
 `packages/backend-common` once a third service needed them — see "Known
-gaps" history below), a direct/online REST endpoint, a `/sync/push` +
-`/sync/pull` gateway with idempotency on `client_event_id`, and a
-least-privilege Postgres role (`procurement_svc`, `manufacturing_svc`,
-`sales_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
-additionally introduces the platform's first real-time business gate: an
-order is blocked server-side, synchronously, if it would exceed an agent's
+gaps" history below), and a least-privilege Postgres role
+(`procurement_svc`, `manufacturing_svc`, `sales_svc`, `accounting_svc`,
+`crm_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
+introduces the platform's first real-time business gate: an order is
+blocked server-side, synchronously, if it would exceed an agent's
 available trading capital (`trading_capital_ledger`, computed live, never
-cached) — the centerpiece rule from the original PRD. Now that this pattern
-is proven three times, the remaining three modules are largely mechanical
-repetition of it.
+cached) — the centerpiece rule from the original PRD.
+
+Accounting and CRM are platform extensions added after the original three,
+not part of the initial 15-module PRD/FRS — the user asked for a genuine
+double-entry-adjacent AP/AR layer (Vendor Bills, Customer Invoices, manual
+journal entries, Trial Balance/P&L/Balance Sheet) built **on top of** the
+Unified Ledger that `ledger-service` already maintains, plus a CRM module
+whose `Customer` entity is linked into Sales Orders. `accounting-service`
+is architecturally distinct from the first three: it runs its own Kafka
+**consumer** (a second, independent consumer group on the same
+`erp.events` topic `ledger-service` already reads) to auto-generate bills/
+invoices from `grn.posted.v1`/`sales.order_fulfilled.v1`, in addition to
+producing the two payment events above. See
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md)'s "Vertical Slice #4" section for the
+full verification trail.
 
 ## Repo layout
 
@@ -46,8 +59,10 @@ repetition of it.
 backend/
   procurement-service/   # NestJS: Suppliers, PR, PO, GRN, Sync Gateway
   manufacturing-service/ # NestJS: Recipes, Production Batch close, Sync Gateway
-  sales-service/         # NestJS: Agents/capital status, Sales Orders (capital-gated), NCR, Sync Gateway
-  ledger-service/        # Go: Kafka consumer, double-entry posting engine (all three modules)
+  sales-service/         # NestJS: Agents/capital status, Sales Orders (capital-gated, optional customerId), NCR, Sync Gateway
+  accounting-service/    # NestJS: Vendor Bills/Customer Invoices (auto-generated via own Kafka consumer), manual journals, reports
+  crm-service/           # NestJS: Customers (CRUD-lite), Opportunities, Activities (offline-capturable), Sync Gateway
+  ledger-service/        # Go: Kafka consumer, double-entry posting engine (all modules)
 packages/
   backend-common/        # Shared tenant-context middleware, Kafka producer, Prisma tenant-scoping helper
   contracts/             # Shared event/DTO contracts (JSON Schema)
@@ -55,10 +70,10 @@ infra/
   postgres/migrations/   # SQL migrations, RLS policies
   docker-compose.yml     # Postgres, Redpanda, Redis, MinIO for local dev
 apps/
-  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR capture client
+  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR capture client (no Accounting/CRM screens yet)
 docs/
   SDD.md                 # Full system design documentation
-  RUNBOOK.md             # Verified bring-up + verification trail for all three modules
+  RUNBOOK.md             # Verified bring-up + verification trail for every module
 ```
 
 ## Running locally
@@ -108,6 +123,32 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   needing conditional logic by using two event types (favorable/
   unfavorable) instead; a module that genuinely needs conditional posting
   logic will need this implemented for real.
+- **No Flutter UI for Accounting or CRM yet.** Both modules were built and
+  verified via curl directly against the running services, not through the
+  mobile app — the only slice so far NOT proven on-device on the iOS
+  Simulator. Accounting has no offline-capturable entity by design (bill/
+  invoice payment recording is an inherently connected back-office action,
+  same scope decision as Sales's NCR verification step); CRM's Activities
+  screen and a customer picker on the existing Sales Order capture screen
+  are the two pieces still needed.
+- **NCR-based and invoice-payment-based AR recovery are unreconciled**: a
+  Sales NCR verification and an Accounting Customer Invoice payment both
+  credit the same GL account (1210, Agent Wallet / Trading Capital
+  Receivable) with no cross-check between the two channels — flagged when
+  the Accounting schema was designed (`014_accounting.sql`'s header
+  comment). No rule exists anywhere in the original PRD for whether a
+  customer-invoiced order should even participate in agent capital at all,
+  since that PRD predates the CRM/customer concept entirely.
+- **No period-close / retained-earnings roll-forward** in Accounting's
+  reports — Trial Balance/P&L/Balance Sheet are all-time snapshots, so
+  Balance Sheet's `totalAssets` will always differ from
+  `totalLiabilities + totalEquity` by exactly the P&L's unclosed
+  `netIncome`. Expected, not a bug — see `reports.service.ts`'s class doc
+  comment.
+- **CRM has no Lead/Customer conversion workflow, no dedup/merge** — one
+  `customers` table serves both "prospect" and "existing customer" via
+  `customer_status`, a deliberate simplification (`012_crm.sql`'s header
+  comment).
 
 ### Resolved during development (kept for history, not hidden)
 

@@ -807,3 +807,206 @@ needs a product-listing endpoint on sales-service, which doesn't exist.
   this slice — it's a distinct sub-feature (reward calculation based on
   NCR performance against weekly targets) not required to prove the core
   capital-governance gate, which was the point of this module.
+
+# Vertical Slice #4 — Accounting & CRM (2026-08-01)
+
+Two platform extensions added at the user's request, alongside the
+original 15-module PRD scope: a real Accounting layer on top of the
+Unified Ledger (trackable Vendor Bills/Customer Invoices with due dates
+and payment status, plus manual journal entries and financial reports),
+and a CRM module (Customers/Opportunities/Activities) whose Customer
+entity is wired into Sales Orders immediately rather than built standalone
+first — both scope decisions confirmed by the user up front, not decided
+unilaterally mid-build.
+
+**Important distinction from every prior slice**: `journal_entries`/
+`journal_lines` already existed (migration 005) and were already being
+posted to by `ledger-service` for every module since Slice #1. This slice
+does NOT create a second ledger — `accounting-service` reads and writes
+the SAME tables. What was genuinely missing, and what this slice adds, is
+the *paperwork layer* above the GL: a bill/invoice record with a due date
+and a payment status, which `grn.posted.v1`/`sales.order_fulfilled.v1`
+never had before (they posted straight to GL accounts with nothing behind
+them).
+
+## 1. Apply migrations + regenerate Prisma clients
+
+```
+docker compose -f infra/docker-compose.yml exec -T postgres psql -U metrock -d metrock_erp \
+  -f infra/postgres/migrations/014_accounting.sql \
+  -f infra/postgres/migrations/015_accounting_rls_and_role.sql \
+  -f infra/postgres/migrations/012_crm.sql \
+  -f infra/postgres/migrations/013_crm_rls_and_role.sql
+```
+
+`016_accounting_extra_grants.sql` was added as its own follow-up migration,
+not folded into 015 — by the time it became clear `accounting-service`'s
+`grn.posted.v1` consumer needs to resolve `supplier_id`/`payment_terms` off
+`po_line_id` (the event payload only carries `po_line_id`/`plant_id`, not
+`supplier_id`), migration 015 had already been applied. Rule this project
+has followed since Slice #1: never edit an applied migration, always add a
+new one.
+
+RLS + role smoke test, same pattern as every prior module:
+
+```
+# accounting_svc, wrong tenant -> 0
+docker compose exec postgres psql -U accounting_svc -d metrock_erp -c "
+  SET app.tenant_id = '<some-other-tenant>'; SELECT count(*) FROM chart_of_accounts;"
+# accounting_svc, correct tenant -> 8 (seeded chart of accounts)
+
+# crm_svc, wrong tenant -> 0, correct tenant -> row count of customers created
+docker compose exec postgres psql -U crm_svc -d metrock_erp -c "
+  SET app.tenant_id = '<some-other-tenant>'; SELECT count(*) FROM customers;"
+```
+
+Both confirmed correct before any service code was written.
+
+## 2. Scaffold accounting-service (NestJS, port 3004) and crm-service (port 3005)
+
+Both follow the `packages/backend-common` pattern exactly, including
+`.npmrc` with `install-links=true` from the very first `npm install` —
+learned the hard way in Slice #3 (Bug #7: a local `file:` dependency
+symlinks by default, which breaks Node's module resolution walk-up).
+Verified for both services this time before writing any TypeScript: `ls
+node_modules/@metrock/backend-common` shows a real directory, not a
+symlink.
+
+`accounting-service` is architecturally different from every prior
+service in one respect: it runs its own Kafka **consumer**, not just a
+producer. `ledger-service` (Go) already consumes `grn.posted.v1` and
+`sales.order_fulfilled.v1` off the shared `erp.events` topic to post
+journal entries; `accounting-service` consumes the *same* two event types
+in a second, independent consumer group (`accounting-service`) to
+auto-generate Vendor Bills / Customer Invoices — kafkajs guarantees each
+distinct group id gets its own full copy of every message, so this
+required zero changes to procurement-service or sales-service. See
+`src/kafka/kafka-consumer.service.ts`.
+
+`journals` (manual journal entries) is the one posting path in this whole
+platform not mediated by `ledger-service`'s Kafka consumer at all — a
+manual entry has no source domain event to react to. Migration 015 grants
+`accounting_svc` direct `INSERT` on `journal_entries`/`journal_lines`, a
+deliberate, narrow exception documented in that migration's role comment.
+
+## 3. Extend ledger-service (Go) for the two new payment events
+
+One line added to `sourceModuleFor` in
+`backend/ledger-service/internal/kafka/consumer.go`:
+
+```go
+case "accounting.bill_paid.v1", "accounting.invoice_payment_received.v1":
+    return "accounting"
+```
+
+Nothing else needed changing — the posting engine (`posting_engine.go`)
+was already fully generic (loads `posting_rules` by tenant + event_type,
+pulls a named top-level field out of the event payload as the amount).
+Migration 014 had already inserted the two new `posting_rules` rows
+(`accounting.bill_paid.v1` → Dr 2110/Cr 1100, `accounting.invoice_payment_received.v1`
+→ Dr 1100/Cr 1210) with `amount_expression = 'payment_amount'`, matching
+the field name `accounting-service` actually publishes. Restarted
+ledger-service the same careful way as every prior restart — killed both
+the `go run` wrapper PID and the separately-running compiled binary PID
+(Bug #6 from Slice #2: killing the wrapper alone leaves a second consumer
+racing in the same group).
+
+## 4. Wire `customer_id` into sales-service order creation
+
+`CreateSalesOrderDto.customerId` (optional, `@IsUUID()`), validated
+against `customers` (new `Customer` model in sales-service's Prisma
+schema, read-only, `sales_svc` already had `SELECT` on `customers` from
+migration 013) exactly like the existing `agentId` validation, then passed
+through to the raw `INSERT INTO sales_orders` — no change to the capital-
+eligibility gate logic itself. Required regenerating sales-service's
+Prisma client and letting `nest start --watch` pick up the source change.
+
+## 5. Prove the backend chain — all via curl, both services running live
+
+`accounting-service` subscribes with `fromBeginning: true` — on first
+boot, against a database that already had 6 GRNs and 1 sales order from
+Slices #1–#3's own testing, it immediately and correctly auto-created 6
+Vendor Bills (aggregating GRN lines into one bill per GRN, matching
+`totalAmount` to the sum of `accepted_value`) and logged that the one
+pre-existing sales order had no `customer_id` — a genuine, free proof that
+replay/idempotency works, not staged data.
+
+```
+# New sales order WITH a customerId -> accounting-service auto-raises a Customer Invoice
+curl -X POST localhost:3003/sales-orders -H "x-tenant-id: <tenant>" -d '{
+  "orderNumber": "SO-ACCTG-TEST-001", "agentId": "<agent>", "plantId": "<plant>",
+  "customerId": "<customer>", "lines": [{"skuId": "<sku>", "orderedQty": 10, "unitPrice": 500}]
+}'
+# -> order CONFIRMED; accounting-service's consumer then creates a
+#    customer_invoices row: invoiceNumber INV-<salesOrderId>, totalAmount 5000,
+#    dueDate = invoiceDate + 30 days, sourceEventId = the event_id (idempotency)
+
+curl -X POST localhost:3004/vendor-bills/<billId>/payments -d '{"amount": 4800, ...}'
+curl -X POST localhost:3004/customer-invoices/<invoiceId>/payments -d '{"amount": 5000, ...}'
+# both -> bill/invoice status flips to PAID; overpayment beyond the
+# outstanding balance correctly rejected with 400
+
+# confirmed directly in Postgres:
+#   accounting.bill_paid.v1              -> Dr 2110 (Accounts Payable) / Cr 1100 (Cash)
+#   accounting.invoice_payment_received.v1 -> Dr 1100 (Cash) / Cr 1210 (Agent Wallet)
+# source_module = 'accounting' on both journal_entries rows, confirming step 3's fix
+
+curl -X POST localhost:3004/journal-entries -d '{"lines": [
+  {"accountCode": "1100", "debitAmount": 1000, "creditAmount": 0},
+  {"accountCode": "4000", "debitAmount": 0, "creditAmount": 1000}
+]}'
+# -> balanced entry accepted; an unbalanced entry and a two-sided single
+#    line (debit AND credit both > 0) both correctly rejected with 400
+
+curl localhost:3004/reports/trial-balance
+# -> totalDebit === totalCredit (5,593,780 = 5,593,780) across every
+#    module's accumulated test postings from Slices #1-#4 combined
+```
+
+`GET /reports/profit-and-loss` and `/reports/balance-sheet` both return
+without error, but their numbers include a lot of accumulated noise from
+repeated manual test runs across every prior slice's verification passes
+(this dev database has never been reset) — not a defect in the report
+logic. One thing IS worth flagging as a real, intentional simplification:
+neither report performs a period-close / retained-earnings roll-forward,
+so Balance Sheet's `totalAssets` will always differ from
+`totalLiabilities + totalEquity` by exactly the unclosed `netIncome` from
+the P&L — confirmed this holds exactly in the live numbers, which is the
+expected behavior of an all-time snapshot with no period close, not a
+calculation bug.
+
+`crm-service` verified separately: `customers` CRUD-lite (create + list +
+status update), `opportunities` create + list, and — the one offline-
+capturable entity — `activities` through the real `/sync/push` / `/sync/
+pull` gateway (same idempotent-push / cursor-pull shape as every prior
+module), including a replayed push of the same `clientEventId` correctly
+returning "Already applied" with the same `serverEntityId` rather than a
+duplicate row.
+
+## Known gaps still open after this pass (Accounting & CRM)
+
+- **No Flutter UI yet for either module.** Everything above was verified
+  via curl against the running services, not through the mobile app —
+  unlike Slices #1–#3, this pass has NOT been proven on-device on the iOS
+  Simulator (no kill-the-backend offline test performed for Accounting or
+  CRM). Accounting has no offline-capturable entity by design (bill/
+  invoice payment recording is inherently a connected back-office action,
+  same scope decision as NCR verification in Slice #3), so there's nothing
+  to add to the sync engine for it. CRM's Activities screen + a customer
+  picker on the existing Sales Order capture screen are the two pieces
+  still needed before this slice can be called fully proven end-to-end.
+- **NCR-based and invoice-payment-based AR recovery are unreconciled** —
+  flagged in migration 014's header comment when the schema was designed:
+  both a Sales NCR verification and a Customer Invoice payment credit the
+  same GL account (1210, Agent Wallet / Trading Capital Receivable), with
+  no cross-check preventing an order's exposure from being reduced through
+  both channels independently. No business rule exists anywhere in the
+  original PRD for whether a customer-invoiced order should even
+  participate in agent capital at all — that PRD predates the CRM/customer
+  concept entirely.
+- **No period-close / retained-earnings roll-forward** in
+  `reports.service.ts` — see the P&L/Balance Sheet discussion above.
+- **CRM has no Lead/Customer conversion workflow, no dedup/merge** — one
+  `customers` table serves both "prospect" and "existing customer" via
+  `customer_status`, a deliberate simplification noted in migration 012's
+  header comment.

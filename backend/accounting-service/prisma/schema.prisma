@@ -1,0 +1,254 @@
+// Prisma schema for the Accounting domain service. Mirrors
+// infra/postgres/migrations/014_accounting.sql plus read-only reuse of
+// tables owned by other modules' migrations (005 ledger, 004 procurement,
+// 010 sales, 012 CRM) — see procurement-service/prisma/schema.prisma's
+// header comment for why this is generate-only, not the migration source
+// of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Unified Ledger (migration 005) — read for reports, written only for
+// manual journal entries (the one posting path with no source Kafka event).
+
+model ChartOfAccount {
+  tenantId          String  @map("tenant_id") @db.Uuid
+  accountCode       String  @map("account_code")
+  accountName       String  @map("account_name")
+  accountType       String  @map("account_type")
+  parentAccountCode String? @map("parent_account_code")
+  isActive          Boolean @map("is_active")
+
+  @@id([tenantId, accountCode])
+  @@map("chart_of_accounts")
+}
+
+model PostingRule {
+  tenantId           String  @map("tenant_id") @db.Uuid
+  postingRuleId      String  @map("posting_rule_id") @db.Uuid
+  eventType          String  @map("event_type")
+  debitAccountCode   String  @map("debit_account_code")
+  creditAccountCode  String  @map("credit_account_code")
+  amountExpression   String  @map("amount_expression")
+  conditionExpression String? @map("condition_expression")
+  isActive           Boolean @map("is_active")
+
+  @@id([tenantId, postingRuleId])
+  @@map("posting_rules")
+}
+
+model JournalEntry {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  journalEntryId  String   @map("journal_entry_id") @db.Uuid
+  sourceEventId   String   @map("source_event_id") @db.Uuid
+  sourceModule    String   @map("source_module")
+  postingDate     DateTime @map("posting_date")
+  status          String
+  memo            String?
+
+  lines JournalLine[]
+
+  @@id([tenantId, journalEntryId])
+  @@unique([tenantId, sourceEventId])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  tenantId          String  @map("tenant_id") @db.Uuid
+  journalLineId     String  @map("journal_line_id") @db.Uuid
+  journalEntryId    String  @map("journal_entry_id") @db.Uuid
+  accountCode       String  @map("account_code")
+  debitAmount       Decimal @map("debit_amount") @db.Decimal(14, 2)
+  creditAmount      Decimal @map("credit_amount") @db.Decimal(14, 2)
+  costCenterPlantId String? @map("cost_center_plant_id") @db.Uuid
+
+  journalEntry JournalEntry @relation(fields: [tenantId, journalEntryId], references: [tenantId, journalEntryId])
+
+  @@id([tenantId, journalLineId])
+  @@map("journal_lines")
+}
+
+// --- Read-only master/source data from other modules' migrations ---
+
+model Plant {
+  tenantId  String @map("tenant_id") @db.Uuid
+  plantId   String @map("plant_id") @db.Uuid
+  plantCode String @map("plant_code")
+  plantName String @map("plant_name")
+
+  vendorBills       VendorBill[]
+  customerInvoices  CustomerInvoice[]
+
+  @@id([tenantId, plantId])
+  @@map("plants")
+}
+
+model Supplier {
+  tenantId     String @map("tenant_id") @db.Uuid
+  supplierId   String @map("supplier_id") @db.Uuid
+  supplierCode String @map("supplier_code")
+  supplierName String @map("supplier_name")
+  paymentTerms String? @map("payment_terms")
+
+  vendorBills VendorBill[]
+
+  @@id([tenantId, supplierId])
+  @@map("suppliers")
+}
+
+// Read-only — accounting-service only joins these to resolve supplier_id
+// and payment_terms off a grn.posted.v1 event's po_line_id (the event
+// itself doesn't carry supplier_id). See migration 016's header comment.
+model PurchaseOrder {
+  tenantId     String @map("tenant_id") @db.Uuid
+  poId         String @map("po_id") @db.Uuid
+  supplierId   String @map("supplier_id") @db.Uuid
+  paymentTerms String? @map("payment_terms")
+
+  lines PurchaseOrderLine[]
+
+  @@id([tenantId, poId])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLine {
+  tenantId String @map("tenant_id") @db.Uuid
+  poLineId String @map("po_line_id") @db.Uuid
+  poId     String @map("po_id") @db.Uuid
+
+  purchaseOrder PurchaseOrder @relation(fields: [tenantId, poId], references: [tenantId, poId])
+
+  @@id([tenantId, poLineId])
+  @@map("purchase_order_lines")
+}
+
+model Customer {
+  tenantId     String @map("tenant_id") @db.Uuid
+  customerId   String @map("customer_id") @db.Uuid
+  customerCode String @map("customer_code")
+  customerName String @map("customer_name")
+
+  customerInvoices CustomerInvoice[]
+
+  @@id([tenantId, customerId])
+  @@map("customers")
+}
+
+model SalesOrder {
+  tenantId     String  @map("tenant_id") @db.Uuid
+  salesOrderId String  @map("sales_order_id") @db.Uuid
+  orderNumber  String  @map("order_number")
+  plantId      String  @map("plant_id") @db.Uuid
+  customerId   String? @map("customer_id") @db.Uuid
+
+  customerInvoice CustomerInvoice?
+
+  @@id([tenantId, salesOrderId])
+  @@map("sales_orders")
+}
+
+// --- This module's own tables (migration 014) ---
+
+model VendorBill {
+  tenantId    String   @map("tenant_id") @db.Uuid
+  billId      String   @map("bill_id") @db.Uuid
+  billNumber  String   @map("bill_number")
+  supplierId  String   @map("supplier_id") @db.Uuid
+  plantId     String   @map("plant_id") @db.Uuid
+  grnId       String   @map("grn_id") @db.Uuid
+  billDate    DateTime @map("bill_date") @db.Date
+  dueDate     DateTime @map("due_date") @db.Date
+  totalAmount Decimal  @map("total_amount") @db.Decimal(14, 2)
+  amountPaid  Decimal  @map("amount_paid") @db.Decimal(14, 2)
+  billStatus  String   @map("bill_status")
+  createdAt   DateTime @map("created_at")
+
+  supplier Supplier            @relation(fields: [tenantId, supplierId], references: [tenantId, supplierId])
+  plant    Plant               @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  lines    VendorBillLine[]
+  payments VendorBillPayment[]
+
+  @@id([tenantId, billId])
+  @@unique([tenantId, billNumber])
+  @@unique([tenantId, grnId])
+  @@map("vendor_bills")
+}
+
+model VendorBillLine {
+  tenantId      String  @map("tenant_id") @db.Uuid
+  billLineId    String  @map("bill_line_id") @db.Uuid
+  billId        String  @map("bill_id") @db.Uuid
+  sourceEventId String  @map("source_event_id") @db.Uuid
+  lineValue     Decimal @map("line_value") @db.Decimal(14, 2)
+
+  bill VendorBill @relation(fields: [tenantId, billId], references: [tenantId, billId])
+
+  @@id([tenantId, billLineId])
+  @@unique([tenantId, sourceEventId])
+  @@map("vendor_bill_lines")
+}
+
+model VendorBillPayment {
+  tenantId      String   @map("tenant_id") @db.Uuid
+  paymentId     String   @map("payment_id") @db.Uuid
+  billId        String   @map("bill_id") @db.Uuid
+  paymentDate   DateTime @map("payment_date")
+  amount        Decimal  @db.Decimal(14, 2)
+  paymentMethod String   @map("payment_method")
+  referenceNo   String?  @map("reference_no")
+  createdAt     DateTime @map("created_at")
+
+  bill VendorBill @relation(fields: [tenantId, billId], references: [tenantId, billId])
+
+  @@id([tenantId, paymentId])
+  @@map("vendor_bill_payments")
+}
+
+model CustomerInvoice {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  invoiceId      String   @map("invoice_id") @db.Uuid
+  invoiceNumber  String   @map("invoice_number")
+  customerId     String   @map("customer_id") @db.Uuid
+  salesOrderId   String   @map("sales_order_id") @db.Uuid
+  plantId        String   @map("plant_id") @db.Uuid
+  invoiceDate    DateTime @map("invoice_date") @db.Date
+  dueDate        DateTime @map("due_date") @db.Date
+  totalAmount    Decimal  @map("total_amount") @db.Decimal(14, 2)
+  amountPaid     Decimal  @map("amount_paid") @db.Decimal(14, 2)
+  invoiceStatus  String   @map("invoice_status")
+  sourceEventId  String   @map("source_event_id") @db.Uuid
+  createdAt      DateTime @map("created_at")
+
+  customer   Customer            @relation(fields: [tenantId, customerId], references: [tenantId, customerId])
+  plant      Plant               @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  salesOrder SalesOrder          @relation(fields: [tenantId, salesOrderId], references: [tenantId, salesOrderId])
+  payments   CustomerInvoicePayment[]
+
+  @@id([tenantId, invoiceId])
+  @@unique([tenantId, invoiceNumber])
+  @@unique([tenantId, salesOrderId])
+  @@unique([tenantId, sourceEventId])
+  @@map("customer_invoices")
+}
+
+model CustomerInvoicePayment {
+  tenantId      String   @map("tenant_id") @db.Uuid
+  paymentId     String   @map("payment_id") @db.Uuid
+  invoiceId     String   @map("invoice_id") @db.Uuid
+  paymentDate   DateTime @map("payment_date")
+  amount        Decimal  @db.Decimal(14, 2)
+  paymentMethod String   @map("payment_method")
+  referenceNo   String?  @map("reference_no")
+  createdAt     DateTime @map("created_at")
+
+  invoice CustomerInvoice @relation(fields: [tenantId, invoiceId], references: [tenantId, invoiceId])
+
+  @@id([tenantId, paymentId])
+  @@map("customer_invoice_payments")
+}

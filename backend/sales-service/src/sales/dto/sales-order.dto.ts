@@ -42,6 +42,15 @@ export class CreateSalesOrderDto {
   @IsUUID()
   plantId!: string;
 
+  // Optional CRM link (migration 012's nullable sales_orders.customer_id).
+  // NULL means "no CRM customer recorded for this order" — does not affect
+  // the agent-capital eligibility gate above, which is unchanged either
+  // way. When present, accounting-service's sales.order_fulfilled.v1
+  // consumer uses it to auto-raise a Customer Invoice.
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
   @IsOptional()
   @IsISO8601()
   orderDate?: string;
