@@ -1071,3 +1071,169 @@ every prior slice's testing):
   `customers` table serves both "prospect" and "existing customer" via
   `customer_status`, a deliberate simplification noted in migration 012's
   header comment.
+
+# Vertical Slice #5 — Logistics, Fleet & Fuel Management (2026-08-01)
+
+The fourth of the original 15 PRD/FRS modules (docs/SDD.md §3.E), after
+Procurement, Manufacturing, and Sales — picking back up on the original
+module list rather than another platform extension.
+
+## 1. Apply migrations + seed data
+
+```
+docker compose -f infra/docker-compose.yml exec -T postgres psql -U metrock -d metrock_erp \
+  -f infra/postgres/migrations/017_fleet.sql \
+  -f infra/postgres/migrations/018_fleet_rls_and_role.sql
+psql ... -f infra/postgres/seed/fleet_seed.sql
+```
+
+Schema: `vehicle_class_fuel_norms` (configurable `litres_per_km` +
+tolerance band per class), `drivers`, `vehicles` (tracks
+`current_mileage` / `service_threshold_km`), `trip_logs` and
+`fuel_records` (both offline-capturable — the two use cases the SDD names
+explicitly), and `maintenance_requests` — one shared review queue fed by
+both the mileage-threshold check and the fuel-variance check, per the
+SDD's explicit instruction not to assume a root cause between "mechanical
+fault" and "fuel diversion."
+
+Seed vehicle deliberately starts at `current_mileage = 9850` against a
+`service_threshold_km = 10000` — close enough that the first real trip
+logged during verification crosses the threshold, proving the auto-
+maintenance trigger without needing synthetic setup.
+
+RLS + role smoke test, same pattern as every prior module — wrong tenant
+-> 0, correct tenant -> 1 seeded vehicle. Confirmed before any service
+code was written.
+
+## 2. Scaffold fleet-service (NestJS, port 3006)
+
+Same `packages/backend-common` pattern, `.npmrc` with `install-links=true`
+from the first `npm install`. One new build-time lesson (not a runtime
+bug, caught immediately by `nest build`): `TripLog`/`FuelRecord` have a
+`bigserial sync_seq` column, and Prisma's typed `.create()` requires that
+field in its input type since it has no `@default` Prisma recognizes —
+exactly the reason procurement-service/manufacturing-service/sales-service
+all write their sync-tracked tables via raw `$executeRaw` INSERT instead
+of the typed client. `TripsService`/`FuelService` were initially written
+using `.create()` (a fresh mistake, not present in copied code) and fixed
+to match the established raw-insert convention before ever running.
+
+Vehicles/Drivers are fetched directly online (no local cache table), same
+simplification as every other module's master data. Trip logs use
+single-shot capture (start + end mileage together) rather than a
+start/then/end two-phase flow — a deliberate scope decision, not required
+to prove the offline pattern.
+
+## 3. Extend ledger-service (Go)
+
+One line in `sourceModuleFor`:
+```go
+case "fleet.fuel_recorded.v1", "fleet.maintenance_completed.v1":
+    return "fleet"
+```
+New GL accounts (migration 017): 5320 Vehicle Fuel Expense, 5330 Vehicle
+Maintenance Expense (both EXPENSE). Posting rules: `fleet.fuel_recorded.v1`
+-> Dr 5320 / Cr 1100 (Cash and Bank); `fleet.maintenance_completed.v1` ->
+Dr 5330 / Cr 2110 (Accounts Payable). The SDD names an "or" on the fuel
+credit side (Cash/Fuel Card Payable, or Employee Expense Payable if
+reimbursed) — this posting engine only supports one fixed credit account
+per event_type (`condition_expression` is still never evaluated, a gap
+since Slice #1), so this picks the simplest deterministic path: fuel paid
+from company cash immediately. Fuel variance itself is never posted
+(SDD's explicit note) — only actual `fuel_cost`/`parts_cost+labour_cost`
+ever hit the ledger. Restarted ledger-service the careful way (killed
+both the `go run` wrapper and the compiled binary PIDs).
+
+## 4. Prove the backend chain — all via curl
+
+```
+# Trip that pushes mileage from the seeded 9850 past the 10000 threshold
+curl -X POST localhost:3006/trip-logs -d '{
+  "vehicleId": "<vehicle>", "driverId": "<driver>",
+  "startMileage": 9850, "endMileage": 10050
+}'
+# -> vehicle.current_mileage updated to 10050; a SERVICE_THRESHOLD
+#    maintenance_requests row auto-created (OPEN)
+
+# Fuel record within tolerance (200km * 0.12L/km = 24L expected; logged 25L)
+curl -X POST localhost:3006/fuel-records -d '{"vehicleId":"<v>","tripLogId":"<trip>","litres":25,"fuelCost":15000}'
+# -> "Fuel record logged and posted." — no investigation opened
+
+# Fuel record WAY outside tolerance (same trip, 50L vs 24L expected)
+curl -X POST localhost:3006/fuel-records -d '{"vehicleId":"<v>","tripLogId":"<trip>","litres":50,"fuelCost":30000}'
+# -> "...Fuel variance outside tolerance — a maintenance investigation was opened."
+#    a FUEL_VARIANCE_INVESTIGATION row lands in the SAME maintenance_requests
+#    queue as the threshold-triggered row above
+
+# Matrix Scenario #9: a second trip, cancelled directly in Postgres after
+# creation, then a fuel record submitted against it
+curl -X POST localhost:3006/fuel-records -d '{"vehicleId":"<v>","tripLogId":"<cancelled-trip>","litres":6,"fuelCost":3600}'
+# -> still ACKED, "...Referenced trip was cancelled — flagged for review."
+#    fuel_records.orphaned_trip_reference = true in Postgres — never rejected
+
+# Complete the SERVICE_THRESHOLD request (online-only, mirrors NCR verify)
+curl -X POST localhost:3006/maintenance-requests/<id>/complete -d '{"partsCost":12000,"labourCost":5000}'
+
+# confirmed directly in Postgres:
+#   3x fleet.fuel_recorded.v1  -> Dr 5320 / Cr 1100  (15000, 30000, 3600)
+#   1x fleet.maintenance_completed.v1 -> Dr 5330 / Cr 2110 (17000 = 12000+5000)
+# source_module = 'fleet' on all four journal_entries rows
+```
+
+## 5. Flutter: Vehicles tab, Trip Log + Fuel Record capture
+
+Fifth tab (`_VehiclesTab`, tab bar now `isScrollable: true` — five tabs no
+longer fit unscrolled), fetched directly online via `ApiClient
+.fetchVehicles()`. Vehicle detail screen exposes both offline-capturable
+actions: **Log Trip** and **Log Fuel**. New `TripLogsLocal`/
+`FuelRecordsLocal` Drift tables (schema v4 -> v5), new `SyncModule.fleet`
+push/pull routing (`trip_log`/`fuel_record` push, `trip_logs`/
+`fuel_records` pull).
+
+Driver is taken from the vehicle's `assignedDriverId` rather than a
+driver picker (only one seeded driver — same "hardcode the one option"
+simplification as the Sales module's hardcoded order SKU). Fuel capture
+has no trip picker (`tripLogId` always null from this screen) — matching
+against a specific trip would need a list-trips-for-vehicle endpoint that
+doesn't exist client-side; the variance workflow itself is already fully
+proven directly against the backend above, and a fuel record with no
+trip reference is a legitimate case anyway (e.g. a periodic tank fill-up).
+
+**Proven exactly like every prior slice** — real device, real
+kill-the-backend:
+
+1. Vehicles tab correctly showed live server state (10050 km) reflecting
+   the curl-based trip logged in step 4 — confirms the tab reads real
+   data, not a fixture.
+2. **Killed `fleet-service` entirely.** Opened VEH-0001, tapped **Log
+   Trip** (start mileage pre-filled from last known mileage), entered an
+   end mileage, saved — "Saved locally...". Confirmed directly in the
+   device's SQLite file that the `trip_log` outbox row existed with
+   `sync_status = 'PENDING'` before the backend ever came back up.
+   Repeated for **Log Fuel** — same result, second `PENDING` outbox row.
+3. Restarted `fleet-service`, tapped sync. Both outbox rows flipped to
+   `ACKED`; confirmed server-side both landed with `created_offline =
+   true`.
+
+## Known gaps still open after this pass (Fleet)
+
+- **No driver picker, no trip picker on fuel capture** — see §5 above;
+  both are UI scope decisions, not backend limitations (the backend
+  endpoints accept any valid `driverId`/`tripLogId`; both variance and
+  Scenario #9 code paths are already proven directly).
+- **`vehicle_class_fuel_norms` and vehicle/driver master data have no
+  CRUD UI anywhere** — seeded directly via SQL, same as every other
+  module's master data at this stage (agents, product_skus, suppliers).
+- **`maintenance_requests` has no Flutter UI at all** — listing and
+  completing a request were only proven via curl. Completion is
+  correctly an online-only back-office action by design (mirrors NCR
+  verification), but even a read-only "my vehicle's open maintenance"
+  view doesn't exist yet.
+- **Fuel Card Payable / Employee Expense Payable split is not
+  implemented** — the SDD's "or" on the fuel credit account collapses to
+  a single deterministic Cash and Bank posting, since `condition_expression`
+  is still never evaluated anywhere in this platform (a gap since Slice #1).
+- **No fleet dashboard/KPI view** for fuel variance trends across
+  vehicles — each variance is investigated individually via
+  `maintenance_requests`, but nothing aggregates them into the
+  "operational KPI" framing the SDD describes.

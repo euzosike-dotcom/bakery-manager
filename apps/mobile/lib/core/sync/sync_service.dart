@@ -15,7 +15,7 @@ import 'api_client.dart';
 /// before), so the client does the routing itself for now, one entry per
 /// module. Adding a module means adding one entry here, not restructuring
 /// this class.
-enum SyncModule { procurement, manufacturing, sales, crm }
+enum SyncModule { procurement, manufacturing, sales, crm, fleet }
 
 const _pushModuleForEntityType = {
   'goods_receipt': SyncModule.procurement,
@@ -23,6 +23,8 @@ const _pushModuleForEntityType = {
   'sales_order': SyncModule.sales,
   'ncr_collection': SyncModule.sales,
   'activity': SyncModule.crm,
+  'trip_log': SyncModule.fleet,
+  'fuel_record': SyncModule.fleet,
 };
 
 const _pullModuleForEntity = {
@@ -32,6 +34,8 @@ const _pullModuleForEntity = {
   'sales_orders': SyncModule.sales,
   'ncr_collections': SyncModule.sales,
   'activities': SyncModule.crm,
+  'trip_logs': SyncModule.fleet,
+  'fuel_records': SyncModule.fleet,
 };
 
 /// Drives both directions of SDD §2.2:
@@ -76,6 +80,8 @@ class SyncService {
       await _pullEntity('sales_orders');
       await _pullEntity('ncr_collections');
       await _pullEntity('activities');
+      await _pullEntity('trip_logs');
+      await _pullEntity('fuel_records');
     } finally {
       _running = false;
     }
@@ -173,6 +179,10 @@ class SyncService {
           await _applyNcrCollectionsPage(page.records);
         case 'activities':
           await _applyActivitiesPage(page.records);
+        case 'trip_logs':
+          await _applyTripLogsPage(page.records);
+        case 'fuel_records':
+          await _applyFuelRecordsPage(page.records);
       }
 
       await _writeCursor(entity, page.nextCursor);
@@ -312,6 +322,52 @@ class SyncService {
             activityType: row['activity_type'] as String,
             notes: Value(row['notes'] as String?),
             activityDate: DateTime.parse(row['activity_date'] as String),
+            clientEventId: row['client_event_id'] as String,
+            createdOffline: Value(row['created_offline'] as bool),
+            syncSeq: Value(int.parse(row['sync_seq'].toString())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  Future<void> _applyTripLogsPage(List<Map<String, dynamic>> rows) async {
+    await db.batch((batch) {
+      for (final row in rows) {
+        batch.insert(
+          db.tripLogsLocal,
+          TripLogsLocalCompanion.insert(
+            tripLogId: row['trip_log_id'] as String,
+            vehicleId: row['vehicle_id'] as String,
+            driverId: row['driver_id'] as String,
+            tripDate: DateTime.parse(row['trip_date'] as String),
+            startMileage: double.parse(row['start_mileage'].toString()),
+            endMileage: double.parse(row['end_mileage'].toString()),
+            destinationNote: Value(row['destination_note'] as String?),
+            clientEventId: row['client_event_id'] as String,
+            createdOffline: Value(row['created_offline'] as bool),
+            syncSeq: Value(int.parse(row['sync_seq'].toString())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  Future<void> _applyFuelRecordsPage(List<Map<String, dynamic>> rows) async {
+    await db.batch((batch) {
+      for (final row in rows) {
+        batch.insert(
+          db.fuelRecordsLocal,
+          FuelRecordsLocalCompanion.insert(
+            fuelRecordId: row['fuel_record_id'] as String,
+            vehicleId: row['vehicle_id'] as String,
+            tripLogId: Value(row['trip_log_id'] as String?),
+            litres: double.parse(row['litres'].toString()),
+            fuelCost: double.parse(row['fuel_cost'].toString()),
+            expenseClaimReference: Value(row['expense_claim_reference'] as String?),
+            orphanedTripReference: Value(row['orphaned_trip_reference'] as bool),
             clientEventId: row['client_event_id'] as String,
             createdOffline: Value(row['created_offline'] as bool),
             syncSeq: Value(int.parse(row['sync_seq'].toString())),

@@ -183,6 +183,44 @@ class ActivitiesLocal extends Table {
   Set<Column> get primaryKey => {activityId};
 }
 
+/// Local mirror of `trip_logs` (migration 017_fleet.sql) — one of the two
+/// canonical offline-capture use cases named in the SDD mandate (§3.E):
+/// drivers are frequently in zero-connectivity transit corridors. Same
+/// offline-write / reconcile-on-pull pattern as SalesOrdersLocal.
+class TripLogsLocal extends Table {
+  TextColumn get tripLogId => text()(); // client-generated UUID
+  TextColumn get vehicleId => text()();
+  TextColumn get driverId => text()();
+  DateTimeColumn get tripDate => dateTime()();
+  RealColumn get startMileage => real()();
+  RealColumn get endMileage => real()();
+  TextColumn get destinationNote => text().nullable()();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {tripLogId};
+}
+
+/// Local mirror of `fuel_records` (migration 017_fleet.sql) — the other
+/// canonical offline-capture use case alongside TripLogsLocal.
+class FuelRecordsLocal extends Table {
+  TextColumn get fuelRecordId => text()(); // client-generated UUID
+  TextColumn get vehicleId => text()();
+  TextColumn get tripLogId => text().nullable()();
+  RealColumn get litres => real()();
+  RealColumn get fuelCost => real()();
+  TextColumn get expenseClaimReference => text().nullable()();
+  BoolColumn get orphanedTripReference => boolean().withDefault(const Constant(false))();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {fuelRecordId};
+}
+
 /// Per-table pull cursor (SDD §2.2: "client persists last_synced_cursor per
 /// cached table"). `entity` is e.g. "goods_receipts" or "purchase_orders".
 class SyncCursors extends Table {

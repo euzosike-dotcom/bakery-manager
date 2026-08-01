@@ -1,0 +1,152 @@
+// Prisma schema for the Logistics, Fleet & Fuel Management domain service.
+// Mirrors infra/postgres/migrations/017_fleet.sql — see
+// procurement-service/prisma/schema.prisma's header comment for why this
+// is generate-only, not the migration source of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Read-only — owned by 003_governance.sql, reused only to validate a
+// vehicle/driver's plant_id, same cross-module reuse pattern as every
+// other service's Plant model.
+model Plant {
+  tenantId  String @map("tenant_id") @db.Uuid
+  plantId   String @map("plant_id") @db.Uuid
+  plantCode String @map("plant_code")
+
+  vehicles Vehicle[]
+  drivers  Driver[]
+
+  @@id([tenantId, plantId])
+  @@map("plants")
+}
+
+model VehicleClassFuelNorm {
+  tenantId         String  @map("tenant_id") @db.Uuid
+  vehicleClass     String  @map("vehicle_class")
+  litresPerKm      Decimal @map("litres_per_km") @db.Decimal(8, 4)
+  tolerancePercent Decimal @map("tolerance_percent") @db.Decimal(5, 2)
+
+  vehicles Vehicle[]
+
+  @@id([tenantId, vehicleClass])
+  @@map("vehicle_class_fuel_norms")
+}
+
+model Driver {
+  tenantId      String  @map("tenant_id") @db.Uuid
+  driverId      String  @map("driver_id") @db.Uuid
+  driverCode    String  @map("driver_code")
+  driverName    String  @map("driver_name")
+  phone         String?
+  licenseNumber String? @map("license_number")
+  plantId       String? @map("plant_id") @db.Uuid
+  driverStatus  String  @map("driver_status")
+  createdAt     DateTime @map("created_at")
+
+  plant             Plant?     @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  assignedVehicles  Vehicle[]
+  tripLogs          TripLog[]
+
+  @@id([tenantId, driverId])
+  @@unique([tenantId, driverCode])
+  @@map("drivers")
+}
+
+model Vehicle {
+  tenantId           String  @map("tenant_id") @db.Uuid
+  vehicleId          String  @map("vehicle_id") @db.Uuid
+  vehicleCode        String  @map("vehicle_code")
+  plateNumber        String  @map("plate_number")
+  vehicleClass       String  @map("vehicle_class")
+  plantId            String  @map("plant_id") @db.Uuid
+  serviceThresholdKm Decimal @map("service_threshold_km") @db.Decimal(10, 2)
+  currentMileage     Decimal @map("current_mileage") @db.Decimal(10, 2)
+  assignedDriverId   String? @map("assigned_driver_id") @db.Uuid
+  vehicleStatus      String  @map("vehicle_status")
+  createdAt          DateTime @map("created_at")
+
+  plant              Plant                @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  fuelNorm           VehicleClassFuelNorm @relation(fields: [tenantId, vehicleClass], references: [tenantId, vehicleClass])
+  assignedDriver     Driver?              @relation(fields: [tenantId, assignedDriverId], references: [tenantId, driverId])
+  tripLogs           TripLog[]
+  fuelRecords        FuelRecord[]
+  maintenanceRequests MaintenanceRequest[]
+
+  @@id([tenantId, vehicleId])
+  @@unique([tenantId, vehicleCode])
+  @@map("vehicles")
+}
+
+model TripLog {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  tripLogId       String   @map("trip_log_id") @db.Uuid
+  vehicleId       String   @map("vehicle_id") @db.Uuid
+  driverId        String   @map("driver_id") @db.Uuid
+  tripDate        DateTime @map("trip_date")
+  startMileage    Decimal  @map("start_mileage") @db.Decimal(10, 2)
+  endMileage      Decimal  @map("end_mileage") @db.Decimal(10, 2)
+  tripStatus      String   @map("trip_status")
+  destinationNote String?  @map("destination_note")
+  clientEventId   String   @map("client_event_id") @db.Uuid
+  deviceId        String?  @map("device_id") @db.Uuid
+  createdOffline  Boolean  @map("created_offline")
+  syncSeq         BigInt   @map("sync_seq")
+  createdAt       DateTime @map("created_at")
+
+  vehicle    Vehicle      @relation(fields: [tenantId, vehicleId], references: [tenantId, vehicleId])
+  driver     Driver       @relation(fields: [tenantId, driverId], references: [tenantId, driverId])
+  fuelRecords FuelRecord[]
+
+  @@id([tenantId, tripLogId])
+  @@unique([tenantId, clientEventId])
+  @@map("trip_logs")
+}
+
+model FuelRecord {
+  tenantId              String   @map("tenant_id") @db.Uuid
+  fuelRecordId          String   @map("fuel_record_id") @db.Uuid
+  vehicleId             String   @map("vehicle_id") @db.Uuid
+  tripLogId             String?  @map("trip_log_id") @db.Uuid
+  litres                Decimal  @db.Decimal(10, 3)
+  fuelCost              Decimal  @map("fuel_cost") @db.Decimal(14, 2)
+  expenseClaimReference String?  @map("expense_claim_reference")
+  orphanedTripReference Boolean  @map("orphaned_trip_reference")
+  postingStatus         String   @map("posting_status")
+  clientEventId         String   @map("client_event_id") @db.Uuid
+  deviceId              String?  @map("device_id") @db.Uuid
+  createdOffline        Boolean  @map("created_offline")
+  syncSeq               BigInt   @map("sync_seq")
+  createdAt             DateTime @map("created_at")
+
+  vehicle Vehicle  @relation(fields: [tenantId, vehicleId], references: [tenantId, vehicleId])
+  tripLog TripLog? @relation(fields: [tenantId, tripLogId], references: [tenantId, tripLogId])
+
+  @@id([tenantId, fuelRecordId])
+  @@unique([tenantId, clientEventId])
+  @@map("fuel_records")
+}
+
+model MaintenanceRequest {
+  tenantId             String    @map("tenant_id") @db.Uuid
+  maintenanceRequestId String    @map("maintenance_request_id") @db.Uuid
+  vehicleId            String    @map("vehicle_id") @db.Uuid
+  reason               String
+  requestStatus        String    @map("request_status")
+  notes                String?
+  partsCost            Decimal?  @map("parts_cost") @db.Decimal(14, 2)
+  labourCost           Decimal?  @map("labour_cost") @db.Decimal(14, 2)
+  completedAt          DateTime? @map("completed_at")
+  createdAt            DateTime  @map("created_at")
+
+  vehicle Vehicle @relation(fields: [tenantId, vehicleId], references: [tenantId, vehicleId])
+
+  @@id([tenantId, maintenanceRequestId])
+  @@map("maintenance_requests")
+}

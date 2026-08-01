@@ -22,6 +22,12 @@ import 'features/ncr/presentation/ncr_submission_screen.dart';
 import 'features/activity/cubit/activity_capture_cubit.dart';
 import 'features/activity/data/activity_repository.dart';
 import 'features/activity/presentation/activity_capture_screen.dart';
+import 'features/trip_log/cubit/trip_log_capture_cubit.dart';
+import 'features/trip_log/data/trip_log_repository.dart';
+import 'features/trip_log/presentation/trip_log_capture_screen.dart';
+import 'features/fuel_record/cubit/fuel_record_capture_cubit.dart';
+import 'features/fuel_record/data/fuel_record_repository.dart';
+import 'features/fuel_record/presentation/fuel_record_capture_screen.dart';
 
 // Dev-only defaults for the vertical slice (docs/RUNBOOK.md). Production
 // wiring replaces these with real tenant discovery (subdomain/invite-code,
@@ -35,6 +41,7 @@ const _devProcurementBaseUrl = 'http://localhost:3001';
 const _devManufacturingBaseUrl = 'http://localhost:3002';
 const _devSalesBaseUrl = 'http://localhost:3003';
 const _devCrmBaseUrl = 'http://localhost:3005';
+const _devFleetBaseUrl = 'http://localhost:3006';
 const _devWarehouseId = '7840f37a-13eb-4779-aa16-84bf10f7d351'; // WH-PLT1-RM, see infra/postgres/seed/dev_seed.sql
 
 void main() {
@@ -54,6 +61,7 @@ class _MetrockAppState extends State<MetrockApp> {
   late final ApiClient _manufacturingApi;
   late final ApiClient _salesApi;
   late final ApiClient _crmApi;
+  late final ApiClient _fleetApi;
   late final SyncService _sync;
   final String _deviceId = const Uuid().v4();
 
@@ -65,11 +73,13 @@ class _MetrockAppState extends State<MetrockApp> {
     _manufacturingApi = ApiClient(baseUrl: _devManufacturingBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _salesApi = ApiClient(baseUrl: _devSalesBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
+    _fleetApi = ApiClient(baseUrl: _devFleetBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _sync = SyncService(db: _db, apiClients: {
       SyncModule.procurement: _procurementApi,
       SyncModule.manufacturing: _manufacturingApi,
       SyncModule.sales: _salesApi,
       SyncModule.crm: _crmApi,
+      SyncModule.fleet: _fleetApi,
     })
       ..startWatchingConnectivity();
   }
@@ -92,6 +102,7 @@ class _MetrockAppState extends State<MetrockApp> {
         manufacturingApi: _manufacturingApi,
         salesApi: _salesApi,
         crmApi: _crmApi,
+        fleetApi: _fleetApi,
         deviceId: _deviceId,
         sync: _sync,
       ),
@@ -112,6 +123,7 @@ class _HomeScreen extends StatelessWidget {
     required this.manufacturingApi,
     required this.salesApi,
     required this.crmApi,
+    required this.fleetApi,
     required this.deviceId,
     required this.sync,
   });
@@ -121,18 +133,26 @@ class _HomeScreen extends StatelessWidget {
   final ApiClient manufacturingApi;
   final ApiClient salesApi;
   final ApiClient crmApi;
+  final ApiClient fleetApi;
   final String deviceId;
   final SyncService sync;
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Metrock ERP'),
           bottom: const TabBar(
-            tabs: [Tab(text: 'Purchase Orders'), Tab(text: 'Recipes'), Tab(text: 'Agents'), Tab(text: 'Customers')],
+            isScrollable: true,
+            tabs: [
+              Tab(text: 'Purchase Orders'),
+              Tab(text: 'Recipes'),
+              Tab(text: 'Agents'),
+              Tab(text: 'Customers'),
+              Tab(text: 'Vehicles'),
+            ],
           ),
           actions: [
             IconButton(icon: const Icon(Icons.sync), onPressed: sync.syncNow, tooltip: 'Sync now'),
@@ -144,6 +164,7 @@ class _HomeScreen extends StatelessWidget {
             _RecipesTab(db: db, api: manufacturingApi, deviceId: deviceId, sync: sync),
             _AgentsTab(db: db, api: salesApi, crmApi: crmApi, deviceId: deviceId, sync: sync),
             _CustomersTab(db: db, api: crmApi, deviceId: deviceId, sync: sync),
+            _VehiclesTab(db: db, api: fleetApi, deviceId: deviceId, sync: sync),
           ],
         ),
       ),
@@ -576,6 +597,146 @@ class _CustomerDetailScreen extends StatelessWidget {
                 ),
               ),
               child: const Text('Log Activity'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Fifth tab (Fleet slice): Vehicles list, fetched directly online — same
+/// simplification as every other master-data list in this app (see
+/// TripLogsLocal/FuelRecordsLocal's doc comments). Tapping a vehicle opens
+/// a detail screen with the two offline-capturable Fleet actions: Log
+/// Trip and Log Fuel.
+class _VehiclesTab extends StatefulWidget {
+  const _VehiclesTab({required this.db, required this.api, required this.deviceId, required this.sync});
+  final AppDatabase db;
+  final ApiClient api;
+  final String deviceId;
+  final SyncService sync;
+
+  @override
+  State<_VehiclesTab> createState() => _VehiclesTabState();
+}
+
+class _VehiclesTabState extends State<_VehiclesTab> {
+  List<Map<String, dynamic>>? _vehicles;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final vehicles = await widget.api.fetchVehicles();
+      setState(() => _vehicles = vehicles);
+    } catch (e) {
+      setState(() => _loadError = 'Could not reach server (offline?): $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadError != null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!)));
+    }
+    if (_vehicles == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return ListView.builder(
+      itemCount: _vehicles!.length,
+      itemBuilder: (context, index) {
+        final vehicle = _vehicles![index];
+        final driver = vehicle['assignedDriver'] as Map<String, dynamic>?;
+        return ListTile(
+          title: Text('${vehicle['vehicleCode']} — ${vehicle['plateNumber']}'),
+          subtitle: Text(
+            '${vehicle['currentMileage']} / ${vehicle['serviceThresholdKm']} km'
+            '${driver != null ? " · ${driver['driverName']}" : ""}',
+          ),
+          onTap: () => _openVehicleDetail(vehicle),
+        );
+      },
+    );
+  }
+
+  void _openVehicleDetail(Map<String, dynamic> vehicle) {
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => _VehicleDetailScreen(db: widget.db, deviceId: widget.deviceId, vehicle: vehicle),
+          ),
+        )
+        .then((_) => widget.sync.syncNow());
+  }
+}
+
+/// Landing point for the two vehicle-scoped actions this slice
+/// implements — mirrors _AgentDetailScreen/_CustomerDetailScreen's
+/// structure. Driver is taken from the vehicle's `assignedDriverId`
+/// rather than a driver picker — same "hardcode the one seeded option"
+/// simplification as the Sales module's hardcoded order SKU; a real
+/// dispatch app would let a trip be logged against any available driver.
+class _VehicleDetailScreen extends StatelessWidget {
+  const _VehicleDetailScreen({required this.db, required this.deviceId, required this.vehicle});
+  final AppDatabase db;
+  final String deviceId;
+  final Map<String, dynamic> vehicle;
+
+  @override
+  Widget build(BuildContext context) {
+    final currentMileage = double.parse(vehicle['currentMileage'].toString());
+    final assignedDriverId = vehicle['assignedDriverId'] as String?;
+    return Scaffold(
+      appBar: AppBar(title: Text(vehicle['vehicleCode'] as String)),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${vehicle['plateNumber']} · ${vehicle['vehicleClass']}\n'
+              'Mileage: ${currentMileage.toStringAsFixed(2)} / ${vehicle['serviceThresholdKm']} km',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: assignedDriverId == null
+                  ? null
+                  : () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => BlocProvider(
+                            create: (_) => TripLogCaptureCubit(
+                              repository: TripLogRepository(db: db, deviceId: deviceId),
+                              vehicleId: vehicle['vehicleId'] as String,
+                              driverId: assignedDriverId,
+                              currentMileageAtOpen: currentMileage,
+                            ),
+                            child: const TripLogCaptureScreen(),
+                          ),
+                        ),
+                      ),
+              child: const Text('Log Trip'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => BlocProvider(
+                    create: (_) => FuelRecordCaptureCubit(
+                      repository: FuelRecordRepository(db: db, deviceId: deviceId),
+                      vehicleId: vehicle['vehicleId'] as String,
+                    ),
+                    child: const FuelRecordCaptureScreen(),
+                  ),
+                ),
+              ),
+              child: const Text('Log Fuel'),
             ),
           ],
         ),

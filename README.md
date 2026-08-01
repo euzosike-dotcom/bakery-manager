@@ -4,11 +4,11 @@ Multi-tenant, offline-first ERP platform for food manufacturing enterprises.
 Metrock Enterprises is Tenant Zero. Full architecture: see
 [`docs/SDD.md`](docs/SDD.md) (copied from the System Design Documentation).
 
-## Status: Five modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital, Accounting, and CRM
+## Status: Six modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital, Accounting, CRM, and Logistics/Fleet
 
-This repo implements **five modules**, each proving the architecture
-before scaling out to the remaining original-PRD modules (Logistics/Fleet,
-HR/Payroll, Governance) or further platform extensions:
+This repo implements **six modules**, each proving the architecture
+before scaling out to the remaining original-PRD modules (HR/Payroll,
+Governance) or further platform extensions:
 
 ```
 Flutter (offline capture: GRN / production batch / sales order / NCR)
@@ -27,13 +27,14 @@ Flutter (offline capture: GRN / production batch / sales order / NCR)
 | Sales & Agent Capital | `backend/sales-service` | 3003 | `sales.order_fulfilled.v1` -> Dr Agent Wallet/Trading Capital Receivable / Cr Sales Revenue; `ncr.verified.v1` -> Dr Cash and Bank / Cr Agent Wallet |
 | Accounting (Zoho Books/QuickBooks equivalent) | `backend/accounting-service` | 3004 | `accounting.bill_paid.v1` -> Dr Accounts Payable / Cr Cash and Bank; `accounting.invoice_payment_received.v1` -> Dr Cash and Bank / Cr Agent Wallet |
 | CRM | `backend/crm-service` | 3005 | none — no financial postings, integrates via `sales_orders.customer_id` |
+| Logistics, Fleet & Fuel Management | `backend/fleet-service` | 3006 | `fleet.fuel_recorded.v1` -> Dr Vehicle Fuel Expense / Cr Cash and Bank; `fleet.maintenance_completed.v1` -> Dr Vehicle Maintenance Expense / Cr Accounts Payable |
 
-All five domain services share the exact same pattern: tenant-context
+All six domain services share the exact same pattern: tenant-context
 middleware + Prisma tenant-scoping helper (extracted into
 `packages/backend-common` once a third service needed them — see "Known
 gaps" history below), and a least-privilege Postgres role
 (`procurement_svc`, `manufacturing_svc`, `sales_svc`, `accounting_svc`,
-`crm_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
+`crm_svc`, `fleet_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
 introduces the platform's first real-time business gate: an order is
 blocked server-side, synchronously, if it would exceed an agent's
 available trading capital (`trading_capital_ledger`, computed live, never
@@ -53,6 +54,17 @@ producing the two payment events above. See
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)'s "Vertical Slice #4" section for the
 full verification trail.
 
+Logistics/Fleet picks the original 15-module PRD list back up (docs/SDD.md
+§3.E) — trip logs and fuel records are the platform's next two offline-
+capturable entities, and fuel-variance investigation is the platform's
+second auto-triggered review workflow (after Manufacturing's yield
+variance), feeding a shared `maintenance_requests` queue alongside a
+mileage service-threshold check, deliberately not assuming a root cause
+between "mechanical fault" and "fuel diversion" per the SDD. See
+`docs/RUNBOOK.md`'s "Vertical Slice #5" section for the full trail,
+including Matrix Scenario #9 (a fuel record referencing a since-cancelled
+trip is still accepted and posted, only flagged for review).
+
 ## Repo layout
 
 ```
@@ -62,6 +74,7 @@ backend/
   sales-service/         # NestJS: Agents/capital status, Sales Orders (capital-gated, optional customerId), NCR, Sync Gateway
   accounting-service/    # NestJS: Vendor Bills/Customer Invoices (auto-generated via own Kafka consumer), manual journals, reports
   crm-service/           # NestJS: Customers (CRUD-lite), Opportunities, Activities (offline-capturable), Sync Gateway
+  fleet-service/         # NestJS: Vehicles/Drivers, Trip Logs + Fuel Records (offline-capturable), Maintenance Requests, Sync Gateway
   ledger-service/        # Go: Kafka consumer, double-entry posting engine (all modules)
 packages/
   backend-common/        # Shared tenant-context middleware, Kafka producer, Prisma tenant-scoping helper
@@ -70,7 +83,7 @@ infra/
   postgres/migrations/   # SQL migrations, RLS policies
   docker-compose.yml     # Postgres, Redpanda, Redis, MinIO for local dev
 apps/
-  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR/activity capture client
+  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR/activity/trip/fuel capture client
 docs/
   SDD.md                 # Full system design documentation
   RUNBOOK.md             # Verified bring-up + verification trail for every module
@@ -151,6 +164,18 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `customers` table serves both "prospect" and "existing customer" via
   `customer_status`, a deliberate simplification (`012_crm.sql`'s header
   comment).
+- **Fleet's Fuel Card Payable / Employee Expense Payable split isn't
+  implemented** — same `condition_expression`-never-evaluated gap as
+  above; `fleet.fuel_recorded.v1` always credits Cash and Bank.
+- **Fleet has no driver picker or trip picker in the Flutter UI** — Trip
+  capture uses the vehicle's one assigned driver; Fuel capture never sets
+  `tripLogId`. Both are UI scope decisions — the backend accepts either
+  field freely, and the fuel-variance/Scenario-#9 workflows this would
+  exercise are already proven directly against fleet-service (see
+  `docs/RUNBOOK.md`'s "Vertical Slice #5" §4).
+- **`maintenance_requests` has no Flutter UI** — listing and completing a
+  request (the one online-only back-office action in this module, mirrors
+  NCR verification) were only proven via curl.
 
 ### Resolved during development (kept for history, not hidden)
 

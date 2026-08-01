@@ -73,6 +73,15 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// Vehicles (with assigned driver), for the Vehicles tab. Same online-
+  /// only simplification as fetchPurchaseOrders/fetchRecipes/fetchAgents/
+  /// fetchCustomers — no local cache table.
+  Future<List<Map<String, dynamic>>> fetchVehicles() async {
+    final res = await _client.get(Uri.parse('$baseUrl/vehicles'), headers: _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
   /// Pushes a batch of outbox events. Returns the per-event result array —
   /// callers must inspect each entry's `status`, a 200 response does not
   /// mean every event was accepted (SDD §2.2: push is per-event ack/reject).
