@@ -1,18 +1,14 @@
 # Shared Contracts
 
 Event and API contracts shared conceptually across `procurement-service`,
-`manufacturing-service` (both TypeScript), `ledger-service` (Go), and
-`apps/mobile` (Dart). Today these are **documentation-as-JSON-Schema**,
-hand-kept in sync across the languages — there is no codegen pipeline wired
-up yet. Now that two domain services exist, this is close to the point
-where that stops being a reasonable tradeoff — see README.md "Known gaps".
-
-As more modules come online (Sales & Agent Capital, Logistics/Fleet, ...),
-the next real investment here is generating typed clients from these
-schemas (e.g. `quicktype` or `json-schema-to-typescript` /
-`json-schema.dart`) so the services can't silently drift out of sync on
-field names — see `docs/SDD.md` for the full list of event types implied by
-each module's Financial Trigger table.
+`manufacturing-service`, `sales-service` (all TypeScript), `ledger-service`
+(Go), and `apps/mobile` (Dart). Today these are **documentation-as-JSON-
+Schema**, hand-kept in sync across the languages — there is no codegen
+pipeline wired up yet. Now that three domain services exist (a real shared
+package, `packages/backend-common`, was already extracted for the common
+NestJS plumbing at this same threshold — see root README.md "Known gaps"),
+generating typed clients from these schemas is the next investment worth
+making here specifically, not before.
 
 ## events/
 
@@ -23,3 +19,9 @@ each module's Financial Trigger table.
   Intelligence (SDD §3.C). The variance schema documents two event types
   (`_unfavorable`/`_favorable`) in one file since they're two directions of
   the same concept, not two unrelated events.
+- `sales.order_fulfilled.v1.schema.json`, `ncr.verified.v1.schema.json` —
+  Sales & Agent Capital Governance (SDD §3.D). Note that
+  `trading_capital_ledger` (the real-time capital-eligibility gate) is
+  updated synchronously inside sales-service itself, in the same
+  transaction as the order/NCR write — these two Kafka events are only the
+  downstream GL journal posting, not the gate mechanism.

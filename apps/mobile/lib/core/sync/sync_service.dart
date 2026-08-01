@@ -15,17 +15,21 @@ import 'api_client.dart';
 /// before), so the client does the routing itself for now, one entry per
 /// module. Adding a module means adding one entry here, not restructuring
 /// this class.
-enum SyncModule { procurement, manufacturing }
+enum SyncModule { procurement, manufacturing, sales }
 
 const _pushModuleForEntityType = {
   'goods_receipt': SyncModule.procurement,
   'production_batch': SyncModule.manufacturing,
+  'sales_order': SyncModule.sales,
+  'ncr_collection': SyncModule.sales,
 };
 
 const _pullModuleForEntity = {
   'goods_receipts': SyncModule.procurement,
   'goods_receipt_lines': SyncModule.procurement,
   'production_batches': SyncModule.manufacturing,
+  'sales_orders': SyncModule.sales,
+  'ncr_collections': SyncModule.sales,
 };
 
 /// Drives both directions of SDD §2.2:
@@ -67,6 +71,8 @@ class SyncService {
       await _pullEntity('goods_receipts');
       await _pullEntity('goods_receipt_lines');
       await _pullEntity('production_batches');
+      await _pullEntity('sales_orders');
+      await _pullEntity('ncr_collections');
     } finally {
       _running = false;
     }
@@ -158,6 +164,10 @@ class SyncService {
           await _applyGoodsReceiptLinesPage(page.records);
         case 'production_batches':
           await _applyProductionBatchesPage(page.records);
+        case 'sales_orders':
+          await _applySalesOrdersPage(page.records);
+        case 'ncr_collections':
+          await _applyNcrCollectionsPage(page.records);
       }
 
       await _writeCursor(entity, page.nextCursor);
@@ -229,6 +239,52 @@ class SyncService {
             yieldPercent: Value(row['yield_percent'] == null ? null : (row['yield_percent'] as num).toDouble()),
             yieldAlertTriggered: Value(row['yield_alert_triggered'] as bool),
             batchStatus: Value(row['batch_status'] as String),
+            clientEventId: row['client_event_id'] as String,
+            createdOffline: Value(row['created_offline'] as bool),
+            syncSeq: Value(int.parse(row['sync_seq'].toString())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  Future<void> _applySalesOrdersPage(List<Map<String, dynamic>> rows) async {
+    await db.batch((batch) {
+      for (final row in rows) {
+        batch.insert(
+          db.salesOrdersLocal,
+          SalesOrdersLocalCompanion.insert(
+            salesOrderId: row['sales_order_id'] as String,
+            orderNumber: row['order_number'] as String,
+            agentId: row['agent_id'] as String,
+            plantId: row['plant_id'] as String,
+            orderDate: DateTime.parse(row['order_date'] as String),
+            totalOrderValue: double.parse(row['total_order_value'].toString()),
+            orderStatus: Value(row['order_status'] as String),
+            creditEligibilityStatus: Value(row['credit_eligibility_status'] as String),
+            clientEventId: row['client_event_id'] as String,
+            createdOffline: Value(row['created_offline'] as bool),
+            syncSeq: Value(int.parse(row['sync_seq'].toString())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  Future<void> _applyNcrCollectionsPage(List<Map<String, dynamic>> rows) async {
+    await db.batch((batch) {
+      for (final row in rows) {
+        batch.insert(
+          db.ncrCollectionsLocal,
+          NcrCollectionsLocalCompanion.insert(
+            ncrId: row['ncr_id'] as String,
+            ncrReference: row['ncr_reference'] as String,
+            agentId: row['agent_id'] as String,
+            collectionDate: DateTime.parse(row['collection_date'] as String),
+            amount: double.parse(row['amount'].toString()),
+            verifiedFlag: Value(row['verified_flag'] as bool),
             clientEventId: row['client_event_id'] as String,
             createdOffline: Value(row['created_offline'] as bool),
             syncSeq: Value(int.parse(row['sync_seq'].toString())),

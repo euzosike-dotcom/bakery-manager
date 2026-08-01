@@ -538,3 +538,272 @@ across an entire form.
 - Same shared backend-common package gap as noted in `README.md` — now
   proven at exactly the "two services" threshold where it's worth fixing
   before a third.
+
+---
+
+# Interlude — Extracting `packages/backend-common` (2026-08-01)
+
+Before starting Vertical Slice #3, paid down the duplication debt flagged
+above: `tenant-context.middleware.ts`, `current-tenant.decorator.ts`,
+`kafka-producer.service.ts`, and the Prisma tenant-scoping logic moved into
+`packages/backend-common`, consumed by `procurement-service` and
+`manufacturing-service` via `"@metrock/backend-common": "file:../../packages/backend-common"`.
+`KafkaProducerService` now takes a `clientId` constructor argument (the one
+thing that differed per copy), so each service's module registers it via a
+factory provider instead of Nest's default zero-arg instantiation:
+
+```ts
+{ provide: KafkaProducerService, useFactory: () => new KafkaProducerService('procurement-service') }
+```
+
+**Bug #7 — npm symlinks a local `file:` dependency; Node's module
+resolution then escapes the consuming service's `node_modules` entirely.**
+This one is worth understanding in full, because it fails at *runtime*, not
+at `npm install` or `tsc` time, which makes it easy to ship unnoticed.
+
+1. `npm install` for a `file:../../packages/backend-common` dependency
+   defaults to creating a **symlink** at
+   `node_modules/@metrock/backend-common` pointing to the real
+   `packages/backend-common` directory (npm does this to save disk space,
+   same idea as workspace hoisting).
+2. Node's `require()` resolution follows that symlink to its **real path**
+   before walking up looking for `node_modules` directories. So requiring
+   `@nestjs/common` from inside `packages/backend-common/dist/*.js` walks up
+   from `packages/backend-common`, not from
+   `backend/procurement-service/node_modules/@metrock/backend-common` — it
+   never sees `procurement-service`'s own (hoisted) `node_modules/@nestjs/common`
+   at all.
+3. First symptom (before we removed `backend-common`'s own `node_modules`):
+   `backend-common` still had a leftover `node_modules/@nestjs/common` from
+   when it was built, so resolution found *that* copy instead — a **second,
+   separate instance** of `@nestjs/common` in the process. `UnauthorizedException`
+   thrown from that instance fails `instanceof HttpException` checks in
+   Nest's exception filter (different class objects, same name), so Nest
+   couldn't recognize it as an HTTP exception and returned a bare `500`
+   instead of the correct `401` for a missing `x-tenant-id` header. This is
+   the dangerous version: no error message pointing at the real cause,
+   the app "works" for every happy path, and only breaks on an error path
+   that's easy not to test.
+4. After deleting `backend-common`'s own `node_modules` (correct — a
+   library shouldn't ship one), resolution failed outright:
+   `Cannot find module '@nestjs/common'`, `MODULE_NOT_FOUND`, immediately on
+   boot. Loud and obvious, but still a symptom of the same root cause.
+
+**Fix**: force npm to *copy* the dependency instead of symlinking it, via
+`install-links=true` in an `.npmrc` in each consuming service
+(`backend/procurement-service/.npmrc`, `backend/manufacturing-service/.npmrc`,
+and now `backend/sales-service/.npmrc`). Once copied, `@metrock/backend-common`
+is a real subdirectory of the consuming service's own `node_modules`, so
+Node's walk-up correctly finds that service's own hoisted `@nestjs/common`.
+As a side benefit, `backend-common/package.json`'s `"files": ["dist"]`
+field is only respected by npm when it's actually packing/copying (not when
+symlinking), so the copied version is also clean — just `dist/` and
+`package.json`, no stray `src/`/`tsconfig.json`.
+
+**Verification after the fix**: restarted both services, re-ran the
+tenant-isolation checks from Vertical Slice #1/#2 (wrong tenant -> `[]`,
+missing header -> `401` — genuinely `401` this time, not `500`), then
+POSTed a real GRN and confirmed a new balanced journal entry landed
+(`journal_entries` count went 20 -> 21) — i.e. re-verified the *entire*
+already-shipped, already-pushed pipeline still works after touching its
+shared plumbing, not just that it compiles.
+
+If you extract another shared package later: add `install-links=true` to
+that consumer's `.npmrc` from the start, don't wait to hit this.
+
+---
+
+# Vertical Slice #3 — Sales & Agent Capital Governance
+
+**Status: fully verified end-to-end on 2026-08-01.** Same rigor as the
+first two slices — backend proven via curl first (including the two
+scenarios that actually matter: an order within capital and one that
+exceeds it), then the Flutter app itself, on the same simulator, through
+the full offline-kill-restart-sync cycle for both a sales order and an NCR
+submission. `sales-service` was built on `@metrock/backend-common` and with
+`install-links=true` from the start (see the Interlude above) — no repeat
+of that bug here. One new, real bug did surface; documented below.
+
+## 1. Apply migrations + seed data
+
+```bash
+cd infra
+docker compose exec -T postgres psql -U metrock -d metrock_erp < postgres/migrations/010_sales_agent_capital.sql
+docker compose exec -T postgres psql -U metrock -d metrock_erp < postgres/migrations/011_sales_rls_and_role.sql
+docker compose exec -T postgres psql -U metrock -d metrock_erp < postgres/seed/sales_agent_capital_seed.sql
+```
+
+Verify RLS as `sales_svc`, same pattern as the other two roles:
+
+```bash
+docker compose exec postgres psql -U sales_svc -d metrock_erp -c "
+  BEGIN; SET LOCAL app.tenant_id = '4516225e-8cf1-479f-823c-682df503f558';
+  SELECT count(*) FROM agent_master; ROLLBACK;"   # -> 0
+docker compose exec postgres psql -U sales_svc -d metrock_erp -c "
+  BEGIN; SET LOCAL app.tenant_id = 'b17d9226-2a43-43eb-8c5e-a923637b23c5';
+  SELECT count(*) FROM agent_master; ROLLBACK;"   # -> 1
+```
+
+Seeded: Agent `AG-0001` (Chidi Okafor) = `3db3020f-f5fd-4eae-bfa9-f7b9a1ad90d4`,
+`approvedTradingCapital` = 500,000.
+
+## 2. Start sales-service (NestJS, port 3003)
+
+```bash
+cd backend/sales-service
+cp .env.example .env
+source "$HOME/.nvm/nvm.sh" && nvm use 20
+npm install
+npx prisma generate
+npm run start:dev
+```
+
+Smoke-test:
+
+```bash
+curl http://localhost:3003/agents -H "x-tenant-id: b17d9226-2a43-43eb-8c5e-a923637b23c5"
+```
+
+Should return AG-0001 with `availableCapital: 500000` (computed live from
+`trading_capital_ledger`, never cached — see `AgentsService`'s doc
+comment).
+
+**Structural note**: this service has three feature modules (Agents,
+Sales, Ncr) all needing `PrismaService`/`KafkaProducerService`, unlike the
+other two services' single-feature-module structure — declaring those
+providers locally in each module (the pattern procurement-service/
+manufacturing-service use, harmlessly, since only one module needs them
+there) would silently open three separate DB connection pools and Kafka
+producer connections, and leave `SyncModule` with an ambiguous provider to
+resolve. Fixed with `@Global()` `PrismaModule`/`KafkaModule` in
+`src/common/` — see those files' doc comments if adding a fourth module.
+
+## 3. Extend ledger-service
+
+Already done: `sourceModuleFor()` in `internal/kafka/consumer.go` maps
+`sales.order_fulfilled.v1` and `ncr.verified.v1` to `"sales"`. Rebuild and
+restart the same way as Vertical Slice #2 (watch for the stale-duplicate-
+consumer gotcha if you edited this file while an old instance was running).
+
+## 4. Prove the backend chain: the capital gate, directly
+
+This is the one worth being deliberate about — it's the actual point of
+this module.
+
+```bash
+# Order WITHIN capital (300,000 of 500,000 available) -> confirmed + posted
+curl -s -X POST http://localhost:3003/sales-orders \
+  -H "Content-Type: application/json" -H "x-tenant-id: b17d9226-2a43-43eb-8c5e-a923637b23c5" \
+  -d '{"orderNumber":"SO-2026-00001","agentId":"3db3020f-f5fd-4eae-bfa9-f7b9a1ad90d4",
+       "plantId":"aba294c3-c28c-43a9-a465-67ced442a487",
+       "lines":[{"skuId":"8558cee8-8acd-4d5a-a334-3b3dc4088512","orderedQty":1000,"unitPrice":300}]}'
+# -> status ACKED, availableCapital 200000
+
+# Order EXCEEDING remaining capital (700,000 vs 200,000 available) -> blocked, NOT posted
+curl -s -X POST http://localhost:3003/sales-orders \
+  -H "Content-Type: application/json" -H "x-tenant-id: b17d9226-2a43-43eb-8c5e-a923637b23c5" \
+  -d '{"orderNumber":"SO-2026-00002","agentId":"3db3020f-f5fd-4eae-bfa9-f7b9a1ad90d4",
+       "plantId":"aba294c3-c28c-43a9-a465-67ced442a487",
+       "lines":[{"skuId":"8558cee8-8acd-4d5a-a334-3b3dc4088512","orderedQty":1000,"unitPrice":700}]}'
+# -> status NEEDS_REVIEW, reasonCode ORDER_EXCEEDS_AVAILABLE_CAPITAL, availableCapital STILL 200000
+```
+
+Confirm in Postgres: exactly one `journal_entries` row for `source_module =
+'sales'` (Dr `1210` / Cr `4000`, 300,000) — the blocked order produced
+none. Then NCR:
+
+```bash
+# Submit (unverified) -> capital unchanged
+curl -s -X POST http://localhost:3003/ncr-collections \
+  -H "Content-Type: application/json" -H "x-tenant-id: b17d9226-2a43-43eb-8c5e-a923637b23c5" \
+  -d '{"ncrReference":"NCR-2026-00001","agentId":"3db3020f-f5fd-4eae-bfa9-f7b9a1ad90d4","amount":150000}'
+# check /agents/.../capital-status -> still 200000
+
+# Verify (online-only, no sync path) -> restores capital + posts to ledger
+curl -s -X POST "http://localhost:3003/ncr-collections/<ncrId>/verify" \
+  -H "x-tenant-id: b17d9226-2a43-43eb-8c5e-a923637b23c5" -H "x-user-id: b5875910-4707-4a3a-952d-3f2cde434d4e"
+# check /agents/.../capital-status -> 350000 now; new journal entry Dr 1100 / Cr 1210, 150000
+```
+
+**Bug #8 — `payload` field on the sync push DTO needs `@IsObject()`, or the
+entire request gets rejected.** This one cost the most debugging time of
+any bug in this project, because the symptom looked exactly like a UI
+tap-target miss (something this project has had several genuine instances
+of), not a server bug. `SyncPushEventDto.payload` carries either a
+`CreateSalesOrderDto` or a `SubmitNcrDto` shape depending on `entityType` —
+`class-validator` doesn't support "validate as type A or B based on a
+sibling field" natively, so (unlike procurement-service/manufacturing-
+service, which each have only one push-able entity type and could
+strongly-type `payload` with `@ValidateNested() @Type(() => ConcreteDto)`)
+this field was declared as a bare `Record<string, unknown>` with **no
+class-validator decorator at all**. Nest's global `ValidationPipe` here is
+configured `whitelist: true, forbidNonWhitelisted: true` (correctly — it's
+what makes the DTO layer actually mean something). That combination
+doesn't just strip undecorated properties, it **rejects the whole
+request** with `"property payload should not exist"`. Every `/sync/push`
+call failed with a `400` before `SyncService.push` ever ran — and because
+the mobile client's error handling correctly reverts a failed push group
+back to `PENDING` (see Vertical Slice #1's `_pushOutbox`), the *symptom* was
+just "nothing appears server-side after tapping sync," identical to what a
+missed tap looks like. Spent real time re-verifying tap coordinates before
+replicating the exact request with curl and seeing the actual 400.
+
+Fix: `@IsObject()` on `payload` (not `@ValidateNested()` +
+`@Type()`, which would force one concrete shape) — enough to satisfy the
+whitelist without imposing a shape, and `SyncService.push` still does its
+own manual `plainToInstance` + `validate()` per branch afterward (see that
+file's doc comment — this was already correct going in; only the outer
+DTO's whitelist gate was missing). If a future module's push endpoint also
+needs a polymorphic payload, this is the pattern; if you see "property X
+should not exist" from any Nest endpoint, check for a field with no
+validator decorator before assuming the request body is wrong.
+
+## 5. Run the mobile app (Agents tab)
+
+Third tab, third `ApiClient` (`:3003`), agent list shows live
+`availableCapital`; tapping an agent opens a detail screen with **New
+Sales Order** and **Submit Cash Collection (NCR)**. `SyncModule.sales` in
+`core/sync/sync_service.dart` routes `sales_order`/`ncr_collection` push
+and `sales_orders`/`ncr_collections` pull to this service — see that file
+for the routing tables if adding a fourth service.
+
+Order capture hardcodes one finished-good SKU (`BRD-500G`, same as the
+Manufacturing seed) for the single order line — same "no catalog picker
+yet" simplification as the other two capture screens; a real SKU picker
+needs a product-listing endpoint on sales-service, which doesn't exist.
+
+## 6. Prove the vertical slice end-to-end through the app, offline
+
+1. Agents tab -> tap AG-0001 -> **New Sales Order** -> enter a quantity ×
+   price that deliberately exceeds the displayed available capital (the
+   screen shows a warning, but does not block submission — see
+   `SalesOrderCaptureCubit`'s doc comment for why blocking here would
+   repeat Conflict Matrix scenario #7's mistake).
+2. **Killed `sales-service` entirely**, tapped **Save Order** — saved
+   instantly, "Saved locally...", zero network dependency.
+3. Restarted `sales-service`, tapped sync. Confirmed server-side: the
+   order synced with `created_offline = true`, `order_status =
+   NEEDS_REVIEW`, `credit_eligibility_status = BLOCKED` — the capital gate
+   applied correctly to an order that originated offline, exactly as
+   scenario #7 requires, and no journal entry was posted for it.
+4. Repeated for NCR: **Submit Cash Collection (NCR)** while offline, saved
+   locally, synced after reconnecting, landed with `verified_flag = false`
+   — correctly NOT restoring capital (that requires the separate,
+   online-only verify action, which this app has no UI for by design).
+
+## Known gaps still open after this pass (Sales & Agent Capital)
+
+- No SKU catalog / pricing endpoint — order capture hardcodes one product
+  and lets the user type any unit price. A real pricing/price-list
+  subsystem (`product_skus.current_price_list_status` exists as a column
+  in the original module register but nothing reads it yet) is out of
+  scope for this slice.
+- No UI anywhere for NCR verification (correctly — it's an online-only
+  back-office action) or for viewing `trading_capital_ledger` history
+  directly; the capital-status endpoint only exposes the current computed
+  balance, not the entries behind it.
+- `performance_reward_ledger` / weekly reward-band posting
+  (`performance.reward_posted.v1` in the SDD) was explicitly descoped from
+  this slice — it's a distinct sub-feature (reward calculation based on
+  NCR performance against weekly targets) not required to prove the core
+  capital-governance gate, which was the point of this module.

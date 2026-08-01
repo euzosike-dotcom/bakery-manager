@@ -96,6 +96,47 @@ class ProductionConsumptionLocal extends Table {
   Set<Column> get primaryKey => {consumptionId};
 }
 
+/// Local mirror of `sales_orders` (SDD §3.D) — same offline-write /
+/// reconcile-on-pull pattern as GoodsReceiptsLocal/ProductionBatchesLocal.
+/// `creditEligibilityStatus` starts as the client's optimistic guess but is
+/// always overwritten by whatever the server returns on pull — the server
+/// re-check is the only one that actually counts (SDD §2.3 scenario #7).
+class SalesOrdersLocal extends Table {
+  TextColumn get salesOrderId => text()(); // client-generated UUID
+  TextColumn get orderNumber => text()();
+  TextColumn get agentId => text()();
+  TextColumn get plantId => text()();
+  DateTimeColumn get orderDate => dateTime()();
+  RealColumn get totalOrderValue => real()();
+  TextColumn get orderStatus => text().withDefault(const Constant('CONFIRMED'))();
+  TextColumn get creditEligibilityStatus => text().withDefault(const Constant('PENDING_SYNC_VALIDATION'))();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {salesOrderId};
+}
+
+/// Local mirror of `ncr_collections` (SDD §3.D). `verifiedFlag` is always
+/// false at capture time — verification is an online-only back-office
+/// action this client never performs (see NcrService's doc comment on the
+/// server side), so this column only ever flips via a pulled update.
+class NcrCollectionsLocal extends Table {
+  TextColumn get ncrId => text()(); // client-generated UUID
+  TextColumn get ncrReference => text()();
+  TextColumn get agentId => text()();
+  DateTimeColumn get collectionDate => dateTime()();
+  RealColumn get amount => real()();
+  BoolColumn get verifiedFlag => boolean().withDefault(const Constant(false))();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {ncrId};
+}
+
 /// The offline outbox (SDD §2.1) — every write this client makes is an
 /// immutable, replayable intent here, never a "hope it syncs later" direct
 /// table mutation. `payloadJson` is a full intent (not a diff), because a

@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metrock-erp/contracts/events/ncr.verified.v1.json",
+  "title": "ncr.verified.v1",
+  "description": "Emitted by sales-service (src/ncr/ncr.service.ts verifyNcr) ONLY when a back-office user verifies a cash collection reached the bank — never on submission. Posts Dr Cash and Bank (1100) / Cr Agent Wallet / Trading Capital Receivable (1210), restoring the agent's available trading capital. See docs/SDD.md §3.D.",
+  "type": "object",
+  "required": ["event_type", "event_id", "tenant_id", "ncr_id", "agent_id", "ncr_amount", "posted_at"],
+  "properties": {
+    "event_type": { "const": "ncr.verified.v1" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "ncr_id": { "type": "string", "format": "uuid" },
+    "agent_id": { "type": "string", "format": "uuid" },
+    "ncr_amount": { "type": "number", "minimum": 0.01 },
+    "posted_at": { "type": "string", "format": "date-time" }
+  }
+}

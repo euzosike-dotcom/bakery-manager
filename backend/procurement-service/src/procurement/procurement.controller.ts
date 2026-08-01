@@ -1,6 +1,5 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
-import { CurrentTenant } from '../common/current-tenant.decorator';
-import { TenantContext } from '../common/tenant-context.middleware';
+import { CurrentTenant, TenantContext } from '@metrock/backend-common';
 import { CreateGoodsReceiptDto } from './dto/goods-receipt.dto';
 import { ProcurementService } from './procurement.service';
 

@@ -1,0 +1,132 @@
+// Prisma schema for the Sales & Agent Capital Governance domain service.
+// Mirrors infra/postgres/migrations/010_sales_agent_capital.sql — see
+// procurement-service/prisma/schema.prisma's header comment for why this is
+// generate-only, not the migration source of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Read-only from this service's perspective — owned by manufacturing-
+// service's migration (008_manufacturing.sql), reused here for order lines'
+// finished-good SKU picker. Deliberate cross-module reuse of one physical
+// table rather than duplicating a product catalog per module.
+model ProductSku {
+  tenantId    String  @map("tenant_id") @db.Uuid
+  skuId       String  @map("sku_id") @db.Uuid
+  skuCode     String  @map("sku_code")
+  skuName     String  @map("sku_name")
+  skuCategory String  @map("sku_category")
+  unitOfMeasure String @map("unit_of_measure")
+  isActive    Boolean @map("is_active")
+
+  orderLines OrderLine[]
+
+  @@id([tenantId, skuId])
+  @@map("product_skus")
+}
+
+model AgentMaster {
+  tenantId                String  @map("tenant_id") @db.Uuid
+  agentId                 String  @map("agent_id") @db.Uuid
+  agentCode               String  @map("agent_code")
+  agentName               String  @map("agent_name")
+  agentType               String  @map("agent_type")
+  plantId                 String  @map("plant_id") @db.Uuid
+  agentStatus             String  @map("agent_status")
+  approvedTradingCapital  Decimal @map("approved_trading_capital") @db.Decimal(14, 2)
+  capitalCap              Decimal? @map("capital_cap") @db.Decimal(14, 2)
+  baseDiscountPercent     Decimal @map("base_discount_percent") @db.Decimal(5, 2)
+
+  ledgerEntries TradingCapitalLedger[]
+  salesOrders   SalesOrder[]
+  ncrCollections NcrCollection[]
+
+  @@id([tenantId, agentId])
+  @@unique([tenantId, agentCode])
+  @@map("agent_master")
+}
+
+model TradingCapitalLedger {
+  tenantId      String   @map("tenant_id") @db.Uuid
+  tclEntryId    String   @map("tcl_entry_id") @db.Uuid
+  entryDatetime DateTime @map("entry_datetime")
+  agentId       String   @map("agent_id") @db.Uuid
+  entryType     String   @map("entry_type")
+  referenceNo   String   @map("reference_no")
+  debitValue    Decimal  @map("debit_value") @db.Decimal(14, 2)
+  creditValue   Decimal  @map("credit_value") @db.Decimal(14, 2)
+  notes         String?
+
+  agent AgentMaster @relation(fields: [tenantId, agentId], references: [tenantId, agentId])
+
+  @@id([tenantId, tclEntryId])
+  @@map("trading_capital_ledger")
+}
+
+model SalesOrder {
+  tenantId                String   @map("tenant_id") @db.Uuid
+  salesOrderId            String   @map("sales_order_id") @db.Uuid
+  orderNumber             String   @map("order_number")
+  agentId                 String   @map("agent_id") @db.Uuid
+  plantId                 String   @map("plant_id") @db.Uuid
+  orderDate               DateTime @map("order_date")
+  totalOrderValue         Decimal  @map("total_order_value") @db.Decimal(14, 2)
+  orderStatus             String   @map("order_status")
+  creditEligibilityStatus String   @map("credit_eligibility_status")
+  clientEventId           String   @map("client_event_id") @db.Uuid
+  deviceId                String?  @map("device_id") @db.Uuid
+  createdOffline          Boolean  @map("created_offline")
+  syncSeq                 BigInt   @map("sync_seq")
+  createdAt               DateTime @map("created_at")
+
+  agent AgentMaster  @relation(fields: [tenantId, agentId], references: [tenantId, agentId])
+  lines OrderLine[]
+
+  @@id([tenantId, salesOrderId])
+  @@unique([tenantId, clientEventId])
+  @@map("sales_orders")
+}
+
+model OrderLine {
+  tenantId      String  @map("tenant_id") @db.Uuid
+  orderLineId   String  @map("order_line_id") @db.Uuid
+  salesOrderId  String  @map("sales_order_id") @db.Uuid
+  skuId         String  @map("sku_id") @db.Uuid
+  orderedQty    Decimal @map("ordered_qty") @db.Decimal(14, 3)
+  unitPrice     Decimal @map("unit_price") @db.Decimal(14, 2)
+
+  salesOrder SalesOrder @relation(fields: [tenantId, salesOrderId], references: [tenantId, salesOrderId])
+  sku        ProductSku @relation(fields: [tenantId, skuId], references: [tenantId, skuId])
+
+  @@id([tenantId, orderLineId])
+  @@map("order_lines")
+}
+
+model NcrCollection {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  ncrId           String   @map("ncr_id") @db.Uuid
+  ncrReference    String   @map("ncr_reference")
+  agentId         String   @map("agent_id") @db.Uuid
+  collectionDate  DateTime @map("collection_date")
+  amount          Decimal  @map("amount") @db.Decimal(14, 2)
+  verifiedFlag    Boolean  @map("verified_flag")
+  verifiedBy      String?  @map("verified_by") @db.Uuid
+  verifiedAt      DateTime? @map("verified_at")
+  clientEventId   String   @map("client_event_id") @db.Uuid
+  deviceId        String?  @map("device_id") @db.Uuid
+  createdOffline  Boolean  @map("created_offline")
+  syncSeq         BigInt   @map("sync_seq")
+  createdAt       DateTime @map("created_at")
+
+  agent AgentMaster @relation(fields: [tenantId, agentId], references: [tenantId, agentId])
+
+  @@id([tenantId, ncrId])
+  @@unique([tenantId, clientEventId])
+  @@map("ncr_collections")
+}

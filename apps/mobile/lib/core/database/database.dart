@@ -21,6 +21,8 @@ part 'database.g.dart';
   GoodsReceiptLinesLocal,
   ProductionBatchesLocal,
   ProductionConsumptionLocal,
+  SalesOrdersLocal,
+  NcrCollectionsLocal,
   OutboxEvents,
   SyncCursors,
 ])
@@ -28,19 +30,25 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) => m.createAll(),
         onUpgrade: (m, from, to) async {
-          // v1 -> v2: added the Manufacturing module's local tables. Only
-          // additive so far (no existing table changed shape) — a real
-          // column/type change on an existing table would need a proper
-          // step-by-step migration here instead of blanket createTable calls.
+          // v1 -> v2: added the Manufacturing module's local tables.
+          // v2 -> v3: added the Sales & Agent Capital module's local
+          // tables. Both are purely additive so far (no existing table
+          // changed shape) — a real column/type change on an existing
+          // table would need a proper step-by-step migration here instead
+          // of blanket createTable calls.
           if (from < 2) {
             await m.createTable(productionBatchesLocal);
             await m.createTable(productionConsumptionLocal);
+          }
+          if (from < 3) {
+            await m.createTable(salesOrdersLocal);
+            await m.createTable(ncrCollectionsLocal);
           }
         },
       );

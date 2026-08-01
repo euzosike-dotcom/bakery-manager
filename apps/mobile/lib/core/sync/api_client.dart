@@ -50,6 +50,18 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// Agents with live-computed capital status — same online-only
+  /// simplification as fetchPurchaseOrders/fetchRecipes. `availableCapital`
+  /// here is a snapshot at fetch time for display only; it is NOT what
+  /// gates an order (the server re-checks live at order-creation time
+  /// regardless of what this call returned — see SalesOrderCaptureCubit's
+  /// doc comment).
+  Future<List<Map<String, dynamic>>> fetchAgents() async {
+    final res = await _client.get(Uri.parse('$baseUrl/agents'), headers: _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
   /// Pushes a batch of outbox events. Returns the per-event result array —
   /// callers must inspect each entry's `status`, a 200 response does not
   /// mean every event was accepted (SDD §2.2: push is per-event ack/reject).

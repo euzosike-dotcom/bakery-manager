@@ -23,8 +23,12 @@ declare global {
  * Reads tenant/user/device/role identity from headers instead of verifying a
  * signed JWT. This is intentionally isolated to this one file so swapping in
  * real token verification later is a single-file change, not a rewrite of
- * every controller. DO NOT deploy this middleware as-is to any environment
- * that touches real tenant data.
+ * every controller in every service. DO NOT deploy this middleware as-is to
+ * any environment that touches real tenant data.
+ *
+ * Originally duplicated per-service (procurement-service, manufacturing-
+ * service each had their own copy); extracted here once a third service
+ * (sales-service) needed it too — see root README.md "Known gaps".
  */
 @Injectable()
 export class TenantContextMiddleware implements NestMiddleware {

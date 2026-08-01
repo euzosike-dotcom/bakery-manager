@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { KafkaProducerService } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
-import { KafkaProducerService } from '../kafka/kafka-producer.service';
 import { CloseProductionBatchDto, SyncPushResultDto } from './dto/production-batch.dto';
 
 export interface CloseProductionBatchOptions {

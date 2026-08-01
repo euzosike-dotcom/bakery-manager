@@ -1,6 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { TenantContextMiddleware } from './common/tenant-context.middleware';
+import { TenantContextMiddleware } from '@metrock/backend-common';
 import { ProcurementModule } from './procurement/procurement.module';
 import { SyncModule } from './sync/sync.module';
 

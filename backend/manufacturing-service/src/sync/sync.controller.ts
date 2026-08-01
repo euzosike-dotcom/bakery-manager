@@ -1,6 +1,5 @@
 import { Body, Controller, Get, Post, Query } from '@nestjs/common';
-import { CurrentTenant } from '../common/current-tenant.decorator';
-import { TenantContext } from '../common/tenant-context.middleware';
+import { CurrentTenant, TenantContext } from '@metrock/backend-common';
 import { SyncPushRequestDto } from '../production/dto/production-batch.dto';
 import { PullableEntity, SyncService } from './sync.service';
 

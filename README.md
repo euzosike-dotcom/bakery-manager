@@ -4,14 +4,14 @@ Multi-tenant, offline-first ERP platform for food manufacturing enterprises.
 Metrock Enterprises is Tenant Zero. Full architecture: see
 [`docs/SDD.md`](docs/SDD.md) (copied from the System Design Documentation).
 
-## Status: Two modules verified end-to-end — Procurement GRN, Manufacturing/Yield
+## Status: Three modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital
 
-This repo implements **two modules end-to-end**, each proving the
-architecture before scaling out to the remaining four (Sales & Agent
-Capital, Logistics/Fleet, HR/Payroll, Governance):
+This repo implements **three modules end-to-end**, each proving the
+architecture before scaling out to the remaining three (Logistics/Fleet,
+HR/Payroll, Governance):
 
 ```
-Flutter (offline capture: GRN / production batch)
+Flutter (offline capture: GRN / production batch / sales order / NCR)
    -> Drift local DB + outbox_events
    -> Sync Gateway (NestJS domain service: /sync/push, /sync/pull)
    -> Postgres (tenant-partitioned, RLS)
@@ -24,14 +24,21 @@ Flutter (offline capture: GRN / production batch)
 |---|---|---|---|
 | Procurement & Stores | `backend/procurement-service` | 3001 | `grn.posted.v1` -> Dr Raw Material Inventory / Cr Accounts Payable |
 | Manufacturing & Yield | `backend/manufacturing-service` | 3002 | `batch.consumption_recorded.v1` -> Dr WIP / Cr Raw Material Inventory; `batch.output_recorded.v1` -> Dr Finished Goods / Cr WIP; `batch.yield_variance_(un)favorable.v1` -> WIP <-> Manufacturing Variance Expense |
+| Sales & Agent Capital | `backend/sales-service` | 3003 | `sales.order_fulfilled.v1` -> Dr Agent Wallet/Trading Capital Receivable / Cr Sales Revenue; `ncr.verified.v1` -> Dr Cash and Bank / Cr Agent Wallet |
 
-Both domain services share the exact same pattern: tenant-context
-middleware + Prisma helper (currently duplicated per service, see "Known
-gaps" below), a direct/online REST endpoint, a `/sync/push` +
+All three domain services share the exact same pattern: tenant-context
+middleware + Kafka producer + Prisma tenant-scoping helper (extracted into
+`packages/backend-common` once a third service needed them — see "Known
+gaps" history below), a direct/online REST endpoint, a `/sync/push` +
 `/sync/pull` gateway with idempotency on `client_event_id`, and a
-least-privilege Postgres role (`procurement_svc`, `manufacturing_svc`) so
-RLS is a real backstop, not a no-op. Once this pattern is proven twice, the
-remaining four modules are mechanical repetition of it.
+least-privilege Postgres role (`procurement_svc`, `manufacturing_svc`,
+`sales_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
+additionally introduces the platform's first real-time business gate: an
+order is blocked server-side, synchronously, if it would exceed an agent's
+available trading capital (`trading_capital_ledger`, computed live, never
+cached) — the centerpiece rule from the original PRD. Now that this pattern
+is proven three times, the remaining three modules are largely mechanical
+repetition of it.
 
 ## Repo layout
 
@@ -39,17 +46,19 @@ remaining four modules are mechanical repetition of it.
 backend/
   procurement-service/   # NestJS: Suppliers, PR, PO, GRN, Sync Gateway
   manufacturing-service/ # NestJS: Recipes, Production Batch close, Sync Gateway
-  ledger-service/        # Go: Kafka consumer, double-entry posting engine (both modules)
+  sales-service/         # NestJS: Agents/capital status, Sales Orders (capital-gated), NCR, Sync Gateway
+  ledger-service/        # Go: Kafka consumer, double-entry posting engine (all three modules)
+packages/
+  backend-common/        # Shared tenant-context middleware, Kafka producer, Prisma tenant-scoping helper
+  contracts/             # Shared event/DTO contracts (JSON Schema)
 infra/
   postgres/migrations/   # SQL migrations, RLS policies
   docker-compose.yml     # Postgres, Redpanda, Redis, MinIO for local dev
 apps/
-  mobile/                # Flutter: offline-first GRN + batch capture client
-packages/
-  contracts/             # Shared event/DTO contracts (JSON Schema)
+  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR capture client
 docs/
   SDD.md                 # Full system design documentation
-  RUNBOOK.md             # Verified bring-up + verification trail for both modules
+  RUNBOOK.md             # Verified bring-up + verification trail for all three modules
 ```
 
 ## Running locally
@@ -71,32 +80,41 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 - **No API Gateway yet**: the Flutter client talks to each domain service's
   base URL directly (hardcoded per module in `main.dart`), and
   `core/sync/sync_service.dart` routes outbox events to the right service
-  client-side (`SyncModule` enum + a small routing table). This was fine at
-  one module, tolerable at two; it will not scale cleanly to six — a real
-  API Gateway consolidating tenant resolution and per-module routing (as
-  the SDD's architecture diagram already calls for) is the right next
-  infrastructure investment, not more per-module client routing tables.
-- **Shared backend-common package doesn't exist yet**:
-  `procurement-service` and `manufacturing-service` each have their own
-  copy of `common/prisma.service.ts`, `common/tenant-context.middleware.ts`,
-  `common/current-tenant.decorator.ts`, and a near-identical
-  `kafka/kafka-producer.service.ts`. This is the single most
-  correctness-sensitive piece of code in the platform (it's what makes RLS
-  tenant isolation actually work) and it's currently duplicated. Tolerable
-  at two services under active, deliberate parallel construction; extract
-  a shared package before a third module copies it again.
-- **Purchase Order / Recipe caching is incomplete**:
-  `apps/mobile/lib/core/database/tables.dart` defines
-  `PurchaseOrdersCache` / `PurchaseOrderLinesCache` for offline PO lookup,
-  but `main.dart` only holds the fetched `/purchase-orders` and `/recipes`
-  responses in memory — neither is persisted into local cache tables.
-  Practical effect: a tablet needs connectivity at least once to open a
-  given PO or recipe before capture; only the GRN/batch capture itself
-  (once opened) works fully offline. Wiring the fetch-then-cache step is
-  the natural next task for both.
+  client-side (`SyncModule` enum + a small routing table). Fine at three
+  services, will not scale cleanly to six — a real API Gateway
+  consolidating tenant resolution and per-module routing (as the SDD's
+  architecture diagram already calls for) is the right next infrastructure
+  investment, not a fourth entry in the client-side routing table.
+- **No SKU catalog / pricing endpoint**: the Sales module's order capture
+  hardcodes one finished-good SKU and lets the user type any unit price —
+  no product-listing or price-list endpoint exists yet on any service.
+- **`performance_reward_ledger`** (weekly agent reward bands based on NCR
+  performance, `performance.reward_posted.v1` in the SDD) was explicitly
+  descoped from the Sales module — a distinct sub-feature, not required to
+  prove the capital-governance gate that module exists to demonstrate.
+- **Purchase Order / Recipe / Agent caching is incomplete**:
+  `apps/mobile/lib/core/database/tables.dart` defines cache tables for
+  offline master-data lookup (`PurchaseOrdersCache`,
+  `PurchaseOrderLinesCache`), but `main.dart` only holds the fetched
+  `/purchase-orders`, `/recipes`, and `/agents` responses in memory for all
+  three modules — none is persisted into local cache tables. Practical
+  effect: a device needs connectivity at least once to open a given PO,
+  recipe, or agent before capture; only the capture action itself (once
+  that screen is open) works fully offline. Wiring the fetch-then-cache
+  step is the natural next task, common to all three.
 - **`posting_rules.condition_expression`** exists as a column but is never
   evaluated (SDD §3 preamble) — every posting rule so far has been
   unconditional. The Manufacturing module's variance handling worked around
   needing conditional logic by using two event types (favorable/
   unfavorable) instead; a module that genuinely needs conditional posting
   logic will need this implemented for real.
+
+### Resolved during development (kept for history, not hidden)
+
+- ~~Shared backend-common package doesn't exist yet~~ **Resolved
+  2026-08-01**: extracted into `packages/backend-common`, consumed by all
+  three domain services via a local `file:` dependency. See
+  `docs/RUNBOOK.md` "Interlude" for a real npm gotcha this surfaced (local
+  `file:` deps symlink by default, which breaks `instanceof` checks across
+  module instances at runtime — fixed with `install-links=true` in each
+  consumer's `.npmrc`).

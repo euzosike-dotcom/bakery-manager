@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metrock-erp/contracts/events/sales.order_fulfilled.v1.json",
+  "title": "sales.order_fulfilled.v1",
+  "description": "Emitted by sales-service (src/sales/sales.service.ts) only when a sales order passes the server-authoritative capital eligibility check (creditEligibilityStatus = APPROVED). Posts Dr Agent Wallet / Trading Capital Receivable (1210) / Cr Sales Revenue (4000). See docs/SDD.md §3.D.",
+  "type": "object",
+  "required": ["event_type", "event_id", "tenant_id", "sales_order_id", "agent_id", "order_value", "posted_at"],
+  "properties": {
+    "event_type": { "const": "sales.order_fulfilled.v1" },
+    "event_id": { "type": "string", "format": "uuid", "description": "Random per publish — idempotency for this posting is guaranteed by sales_orders.client_event_id at the outer createSalesOrder() call." },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "sales_order_id": { "type": "string", "format": "uuid" },
+    "agent_id": { "type": "string", "format": "uuid" },
+    "order_value": { "type": "number", "minimum": 0, "description": "Sum of orderedQty * unitPrice across all order lines." },
+    "posted_at": { "type": "string", "format": "date-time" }
+  }
+}

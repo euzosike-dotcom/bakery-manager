@@ -1,6 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
-import { CurrentTenant } from '../common/current-tenant.decorator';
-import { TenantContext } from '../common/tenant-context.middleware';
+import { CurrentTenant, TenantContext } from '@metrock/backend-common';
 import { CloseProductionBatchDto } from './dto/production-batch.dto';
 import { ProductionService } from './production.service';
 

@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { KafkaProducerService } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
-import { KafkaProducerService } from '../kafka/kafka-producer.service';
 import { CreateGoodsReceiptDto, SyncPushResultDto } from './dto/goods-receipt.dto';
 
 export interface CreateGoodsReceiptOptions {
