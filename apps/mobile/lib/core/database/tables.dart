@@ -62,6 +62,40 @@ class GoodsReceiptLinesLocal extends Table {
   Set<Column> get primaryKey => {grnLineId};
 }
 
+/// Local mirror of `production_batches` (SDD §3.C) — same offline-write /
+/// reconcile-on-pull pattern as GoodsReceiptsLocal above.
+class ProductionBatchesLocal extends Table {
+  TextColumn get batchId => text()(); // client-generated UUID
+  TextColumn get batchNumber => text()();
+  TextColumn get plantId => text()();
+  TextColumn get skuId => text()();
+  TextColumn get recipeVersionId => text()(); // snapshot-pinned at creation
+  DateTimeColumn get batchDate => dateTime()();
+  RealColumn get plannedQty => real()();
+  RealColumn get actualOutputQty => real()();
+  RealColumn get actualWasteQty => real()();
+  RealColumn get yieldPercent => real().nullable()();
+  BoolColumn get yieldAlertTriggered => boolean().withDefault(const Constant(false))();
+  TextColumn get batchStatus => text().withDefault(const Constant('CLOSED'))();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {batchId};
+}
+
+class ProductionConsumptionLocal extends Table {
+  TextColumn get consumptionId => text()();
+  TextColumn get batchId => text()();
+  TextColumn get ingredientSkuId => text()();
+  RealColumn get plannedQty => real()();
+  RealColumn get actualQty => real()();
+
+  @override
+  Set<Column> get primaryKey => {consumptionId};
+}
+
 /// The offline outbox (SDD §2.1) — every write this client makes is an
 /// immutable, replayable intent here, never a "hope it syncs later" direct
 /// table mutation. `payloadJson` is a full intent (not a diff), because a

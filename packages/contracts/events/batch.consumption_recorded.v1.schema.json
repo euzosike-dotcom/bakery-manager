@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metrock-erp/contracts/events/batch.consumption_recorded.v1.json",
+  "title": "batch.consumption_recorded.v1",
+  "description": "Emitted once per closed production batch by manufacturing-service (src/production/production.service.ts) and consumed by ledger-service to post a Dr Work-in-Progress / Cr Raw Material Inventory journal entry, at ACTUAL consumption cost. See docs/SDD.md §3.C.",
+  "type": "object",
+  "required": ["event_type", "event_id", "tenant_id", "batch_id", "plant_id", "consumption_value", "posted_at"],
+  "properties": {
+    "event_type": { "const": "batch.consumption_recorded.v1" },
+    "event_id": { "type": "string", "format": "uuid", "description": "Random per publish — idempotency for this posting is guaranteed by production_batches.client_event_id at the outer closeProductionBatch() call, not by this ID being deterministic." },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "batch_id": { "type": "string", "format": "uuid" },
+    "plant_id": { "type": "string", "format": "uuid" },
+    "consumption_value": { "type": "number", "minimum": 0, "description": "Sum of actual_qty * unit_cost (from the recipe_version's ingredient cost snapshot) across all consumption lines." },
+    "posted_at": { "type": "string", "format": "date-time" }
+  }
+}

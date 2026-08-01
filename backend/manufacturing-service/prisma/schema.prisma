@@ -1,0 +1,129 @@
+// Prisma schema for the Manufacturing & Yield Intelligence domain service.
+// Mirrors infra/postgres/migrations/008_manufacturing.sql exactly — see
+// procurement-service/prisma/schema.prisma's header comment for why this is
+// generate-only, not the migration source of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ProductSku {
+  tenantId    String  @map("tenant_id") @db.Uuid
+  skuId       String  @map("sku_id") @db.Uuid
+  skuCode     String  @map("sku_code")
+  skuName     String  @map("sku_name")
+  skuCategory String  @map("sku_category")
+  unitOfMeasure String @map("unit_of_measure")
+  standardWeightKg Decimal? @map("standard_weight_kg") @db.Decimal(10, 3)
+  isActive    Boolean @map("is_active")
+
+  recipes              Recipe[]
+  recipeIngredients    RecipeIngredient[]
+  productionBatches    ProductionBatch[]
+  productionConsumption ProductionConsumption[]
+
+  @@id([tenantId, skuId])
+  @@map("product_skus")
+}
+
+model Recipe {
+  tenantId               String  @map("tenant_id") @db.Uuid
+  recipeId               String  @map("recipe_id") @db.Uuid
+  skuId                  String  @map("sku_id") @db.Uuid
+  recipeName             String  @map("recipe_name")
+  currentActiveVersionId String? @map("current_active_version_id") @db.Uuid
+  recipeStatus           String  @map("recipe_status")
+
+  sku      ProductSku       @relation(fields: [tenantId, skuId], references: [tenantId, skuId])
+  versions RecipeVersion[] @relation("RecipeToVersions")
+
+  @@id([tenantId, recipeId])
+  @@map("recipes")
+}
+
+model RecipeVersion {
+  tenantId              String   @map("tenant_id") @db.Uuid
+  recipeVersionId       String   @map("recipe_version_id") @db.Uuid
+  recipeId              String   @map("recipe_id") @db.Uuid
+  versionNo              Int      @map("version_no")
+  standardBatchSize      Decimal  @map("standard_batch_size") @db.Decimal(14, 3)
+  standardYieldQty       Decimal  @map("standard_yield_qty") @db.Decimal(14, 3)
+  standardCost           Decimal  @map("standard_cost") @db.Decimal(14, 2)
+  yieldThresholdPercent  Decimal  @map("yield_threshold_percent") @db.Decimal(5, 2)
+  archivedFlag           Boolean  @map("archived_flag")
+  approvalStatus         String   @map("approval_status")
+
+  recipe      Recipe             @relation("RecipeToVersions", fields: [tenantId, recipeId], references: [tenantId, recipeId])
+  ingredients RecipeIngredient[]
+  batches     ProductionBatch[]
+
+  @@id([tenantId, recipeVersionId])
+  @@unique([tenantId, recipeId, versionNo])
+  @@map("recipe_versions")
+}
+
+model RecipeIngredient {
+  tenantId            String  @map("tenant_id") @db.Uuid
+  recipeIngredientId  String  @map("recipe_ingredient_id") @db.Uuid
+  recipeVersionId      String  @map("recipe_version_id") @db.Uuid
+  ingredientSkuId      String  @map("ingredient_sku_id") @db.Uuid
+  quantityPerBatch     Decimal @map("quantity_per_batch") @db.Decimal(14, 3)
+  unitOfMeasure        String  @map("unit_of_measure")
+  unitCost             Decimal @map("unit_cost") @db.Decimal(14, 2)
+
+  recipeVersion RecipeVersion @relation(fields: [tenantId, recipeVersionId], references: [tenantId, recipeVersionId])
+  ingredientSku ProductSku    @relation(fields: [tenantId, ingredientSkuId], references: [tenantId, skuId])
+
+  @@id([tenantId, recipeIngredientId])
+  @@map("recipe_ingredients")
+}
+
+model ProductionBatch {
+  tenantId            String   @map("tenant_id") @db.Uuid
+  batchId             String   @map("batch_id") @db.Uuid
+  batchNumber         String   @map("batch_number")
+  plantId             String   @map("plant_id") @db.Uuid
+  skuId               String   @map("sku_id") @db.Uuid
+  recipeVersionId     String   @map("recipe_version_id") @db.Uuid
+  batchDate           DateTime @map("batch_date")
+  plannedQty          Decimal  @map("planned_qty") @db.Decimal(14, 3)
+  actualOutputQty     Decimal  @map("actual_output_qty") @db.Decimal(14, 3)
+  actualWasteQty      Decimal  @map("actual_waste_qty") @db.Decimal(14, 3)
+  yieldPercent        Decimal? @map("yield_percent") @db.Decimal(6, 2)
+  yieldAlertTriggered Boolean  @map("yield_alert_triggered")
+  batchStatus         String   @map("batch_status")
+  clientEventId       String   @map("client_event_id") @db.Uuid
+  deviceId            String?  @map("device_id") @db.Uuid
+  createdOffline      Boolean  @map("created_offline")
+  syncSeq             BigInt   @map("sync_seq")
+  createdAt           DateTime @map("created_at")
+
+  sku           ProductSku              @relation(fields: [tenantId, skuId], references: [tenantId, skuId])
+  recipeVersion RecipeVersion           @relation(fields: [tenantId, recipeVersionId], references: [tenantId, recipeVersionId])
+  consumption   ProductionConsumption[]
+
+  @@id([tenantId, batchId])
+  @@unique([tenantId, clientEventId])
+  @@map("production_batches")
+}
+
+model ProductionConsumption {
+  tenantId          String  @map("tenant_id") @db.Uuid
+  consumptionId     String  @map("consumption_id") @db.Uuid
+  batchId           String  @map("batch_id") @db.Uuid
+  ingredientSkuId   String  @map("ingredient_sku_id") @db.Uuid
+  plannedQty        Decimal @map("planned_qty") @db.Decimal(14, 3)
+  actualQty         Decimal @map("actual_qty") @db.Decimal(14, 3)
+  unitCost          Decimal @map("unit_cost") @db.Decimal(14, 2)
+
+  batch         ProductionBatch @relation(fields: [tenantId, batchId], references: [tenantId, batchId])
+  ingredientSku ProductSku      @relation(fields: [tenantId, ingredientSkuId], references: [tenantId, skuId])
+
+  @@id([tenantId, consumptionId])
+  @@map("production_consumption")
+}

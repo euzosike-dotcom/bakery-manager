@@ -92,6 +92,9 @@ func sourceModuleFor(eventType string) string {
 	switch eventType {
 	case "grn.posted.v1":
 		return "procurement"
+	case "batch.consumption_recorded.v1", "batch.output_recorded.v1",
+		"batch.yield_variance_unfavorable.v1", "batch.yield_variance_favorable.v1":
+		return "manufacturing"
 	default:
 		return "unknown"
 	}

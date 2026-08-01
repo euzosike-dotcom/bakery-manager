@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metrock-erp/contracts/events/batch.output_recorded.v1.json",
+  "title": "batch.output_recorded.v1",
+  "description": "Emitted once per closed production batch, immediately after batch.consumption_recorded.v1, to post a Dr Finished Goods Inventory / Cr Work-in-Progress journal entry at the recipe version's STANDARD cost. See docs/SDD.md §3.C.",
+  "type": "object",
+  "required": ["event_type", "event_id", "tenant_id", "batch_id", "plant_id", "output_value", "posted_at"],
+  "properties": {
+    "event_type": { "const": "batch.output_recorded.v1" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "batch_id": { "type": "string", "format": "uuid" },
+    "plant_id": { "type": "string", "format": "uuid" },
+    "output_value": { "type": "number", "minimum": 0, "description": "actual_output_qty * recipe_versions.standard_cost." },
+    "posted_at": { "type": "string", "format": "date-time" }
+  }
+}

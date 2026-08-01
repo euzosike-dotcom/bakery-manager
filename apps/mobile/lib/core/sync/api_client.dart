@@ -2,8 +2,12 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-/// Talks to the procurement-service Sync Gateway (`/sync/push`, `/sync/pull`)
-/// and its direct REST endpoints. Tenant/user/device identity is sent via
+/// Talks to one backend domain service's Sync Gateway (`/sync/push`,
+/// `/sync/pull`) and its direct REST endpoints — this class is generic
+/// across services (only `baseUrl` differs); `main.dart` instantiates one
+/// per module (procurement on :3001, manufacturing on :3002) and
+/// `SyncService` (core/sync/sync_service.dart) routes each entity/event
+/// type to the right instance. Tenant/user/device identity is sent via
 /// headers today (`x-tenant-id`, `x-user-id`, `x-device-id`) — a stand-in for
 /// a real Keycloak-issued bearer token (see backend's
 /// TenantContextMiddleware doc comment for the matching stub on the server
@@ -32,6 +36,16 @@ class ApiClient {
 
   Future<List<Map<String, dynamic>>> fetchPurchaseOrders() async {
     final res = await _client.get(Uri.parse('$baseUrl/purchase-orders'), headers: _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  /// Recipes (with nested versions + ingredients) — fetched directly online,
+  /// same simplification as fetchPurchaseOrders: master/reference data isn't
+  /// on the cursor-based pull path yet (see README "Known gaps"), only the
+  /// transactional entities (goods receipts, production batches) are.
+  Future<List<Map<String, dynamic>>> fetchRecipes() async {
+    final res = await _client.get(Uri.parse('$baseUrl/recipes'), headers: _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }

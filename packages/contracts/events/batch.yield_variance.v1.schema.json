@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metrock-erp/contracts/events/batch.yield_variance.v1.json",
+  "title": "batch.yield_variance_unfavorable.v1 | batch.yield_variance_favorable.v1",
+  "description": "Two event types, not one with a sign field, so the ledger's fixed-Dr/Cr-per-event-type posting_rules model never needs conditional direction logic (see docs/SDD.md §3.C and infra/postgres/migrations/008_manufacturing.sql). Unfavorable: Dr Manufacturing Variance Expense / Cr WIP. Favorable: Dr WIP / Cr Manufacturing Variance Expense. Emitted only when |consumption_value - output_value| >= 0.005; an exact-zero variance emits neither.",
+  "type": "object",
+  "required": ["event_type", "event_id", "tenant_id", "batch_id", "plant_id", "variance_value", "posted_at"],
+  "properties": {
+    "event_type": { "enum": ["batch.yield_variance_unfavorable.v1", "batch.yield_variance_favorable.v1"] },
+    "event_id": { "type": "string", "format": "uuid" },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "batch_id": { "type": "string", "format": "uuid" },
+    "plant_id": { "type": "string", "format": "uuid" },
+    "variance_value": { "type": "number", "exclusiveMinimum": 0, "description": "abs(consumption_value - output_value) — always positive; direction is carried by which event_type was emitted, not by sign." },
+    "posted_at": { "type": "string", "format": "date-time" }
+  }
+}
