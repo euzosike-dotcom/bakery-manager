@@ -101,6 +101,8 @@ func sourceModuleFor(eventType string) string {
 		return "accounting"
 	case "fleet.fuel_recorded.v1", "fleet.maintenance_completed.v1":
 		return "fleet"
+	case "payroll.run_posted.v1":
+		return "hr"
 	default:
 		return "unknown"
 	}

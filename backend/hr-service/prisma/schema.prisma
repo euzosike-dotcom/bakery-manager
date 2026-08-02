@@ -1,0 +1,139 @@
+// Prisma schema for the HR & Revenue-Based Payroll domain service. Mirrors
+// infra/postgres/migrations/019_hr_payroll.sql — see procurement-service/
+// prisma/schema.prisma's header comment for why this is generate-only,
+// not the migration source of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Read-only — owned by 003_governance.sql. Also carries this module's own
+// `payroll_ratio` column (added by migration 019 directly onto this
+// table, not a new one-row-per-plant config table — see that migration's
+// header comment).
+model Plant {
+  tenantId     String  @map("tenant_id") @db.Uuid
+  plantId      String  @map("plant_id") @db.Uuid
+  plantCode    String  @map("plant_code")
+  payrollRatio Decimal @map("payroll_ratio") @db.Decimal(5, 4)
+
+  employees   Employee[]
+  payrollRuns PayrollRun[]
+
+  @@id([tenantId, plantId])
+  @@map("plants")
+}
+
+// Read-only — owned by sales-service's migration (010_sales_agent_capital.sql).
+// hr-service reads this directly to compute Plant Revenue (SDD §3.F) —
+// see migration 020's grant comment for why this is read here instead of
+// derived from journal_entries.
+model SalesOrder {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  salesOrderId    String   @map("sales_order_id") @db.Uuid
+  plantId         String   @map("plant_id") @db.Uuid
+  orderDate       DateTime @map("order_date")
+  totalOrderValue Decimal  @map("total_order_value") @db.Decimal(14, 2)
+  orderStatus     String   @map("order_status")
+
+  @@id([tenantId, salesOrderId])
+  @@map("sales_orders")
+}
+
+model SalaryGrade {
+  tenantId    String  @map("tenant_id") @db.Uuid
+  gradeCode   String  @map("grade_code")
+  gradeName   String  @map("grade_name")
+  gradeWeight Decimal @map("grade_weight") @db.Decimal(6, 4)
+
+  employees Employee[]
+
+  @@id([tenantId, gradeCode])
+  @@map("salary_grades")
+}
+
+model Employee {
+  tenantId         String   @map("tenant_id") @db.Uuid
+  employeeId       String   @map("employee_id") @db.Uuid
+  employeeCode     String   @map("employee_code")
+  fullName         String   @map("full_name")
+  plantId          String   @map("plant_id") @db.Uuid
+  department       String?
+  gradeCode        String   @map("grade_code")
+  employmentStatus String   @map("employment_status")
+  hireDate         DateTime @map("hire_date") @db.Date
+  createdAt        DateTime @map("created_at")
+
+  plant           Plant            @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  grade           SalaryGrade      @relation(fields: [tenantId, gradeCode], references: [tenantId, gradeCode])
+  attendanceLogs  AttendanceLog[]
+  payrollRecords  PayrollRecord[]
+
+  @@id([tenantId, employeeId])
+  @@unique([tenantId, employeeCode])
+  @@map("employees")
+}
+
+model AttendanceLog {
+  tenantId        String   @map("tenant_id") @db.Uuid
+  attendanceLogId String   @map("attendance_log_id") @db.Uuid
+  employeeId      String   @map("employee_id") @db.Uuid
+  eventType       String   @map("event_type")
+  eventTime       DateTime @map("event_time")
+  timeBucket      DateTime @map("time_bucket")
+  clientEventId   String   @map("client_event_id") @db.Uuid
+  deviceId        String?  @map("device_id") @db.Uuid
+  createdOffline  Boolean  @map("created_offline")
+  syncSeq         BigInt   @map("sync_seq")
+  createdAt       DateTime @map("created_at")
+
+  employee Employee @relation(fields: [tenantId, employeeId], references: [tenantId, employeeId])
+
+  @@id([tenantId, attendanceLogId])
+  @@unique([tenantId, clientEventId])
+  @@unique([tenantId, employeeId, eventType, timeBucket])
+  @@map("attendance_logs")
+}
+
+model PayrollRun {
+  tenantId           String   @map("tenant_id") @db.Uuid
+  payrollRunId       String   @map("payroll_run_id") @db.Uuid
+  plantId            String   @map("plant_id") @db.Uuid
+  payrollPeriod      String   @map("payroll_period")
+  payrollStatus      String   @map("payroll_status")
+  postedToBooksFlag  Boolean  @map("posted_to_books_flag")
+  plantRevenue       Decimal  @map("plant_revenue") @db.Decimal(14, 2)
+  payrollRatioUsed   Decimal  @map("payroll_ratio_used") @db.Decimal(5, 4)
+  totalPayrollPool   Decimal  @map("total_payroll_pool") @db.Decimal(14, 2)
+  createdAt          DateTime @map("created_at")
+
+  plant   Plant           @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+  records PayrollRecord[]
+
+  @@id([tenantId, payrollRunId])
+  @@unique([tenantId, plantId, payrollPeriod])
+  @@map("payroll_runs")
+}
+
+model PayrollRecord {
+  tenantId        String  @map("tenant_id") @db.Uuid
+  payrollRecordId String  @map("payroll_record_id") @db.Uuid
+  payrollRunId    String  @map("payroll_run_id") @db.Uuid
+  employeeId      String  @map("employee_id") @db.Uuid
+  gradeWeightUsed Decimal @map("grade_weight_used") @db.Decimal(6, 4)
+  grossSalary     Decimal @map("gross_salary") @db.Decimal(14, 2)
+  totalDeductions Decimal @map("total_deductions") @db.Decimal(14, 2)
+  netSalary       Decimal @map("net_salary") @db.Decimal(14, 2)
+
+  payrollRun PayrollRun @relation(fields: [tenantId, payrollRunId], references: [tenantId, payrollRunId])
+  employee   Employee   @relation(fields: [tenantId, employeeId], references: [tenantId, employeeId])
+
+  @@id([tenantId, payrollRecordId])
+  @@unique([tenantId, payrollRunId, employeeId])
+  @@map("payroll_records")
+}

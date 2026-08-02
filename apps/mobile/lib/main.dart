@@ -28,6 +28,7 @@ import 'features/trip_log/presentation/trip_log_capture_screen.dart';
 import 'features/fuel_record/cubit/fuel_record_capture_cubit.dart';
 import 'features/fuel_record/data/fuel_record_repository.dart';
 import 'features/fuel_record/presentation/fuel_record_capture_screen.dart';
+import 'features/attendance/data/attendance_repository.dart';
 
 // Dev-only defaults for the vertical slice (docs/RUNBOOK.md). Production
 // wiring replaces these with real tenant discovery (subdomain/invite-code,
@@ -42,6 +43,7 @@ const _devManufacturingBaseUrl = 'http://localhost:3002';
 const _devSalesBaseUrl = 'http://localhost:3003';
 const _devCrmBaseUrl = 'http://localhost:3005';
 const _devFleetBaseUrl = 'http://localhost:3006';
+const _devHrBaseUrl = 'http://localhost:3007';
 const _devWarehouseId = '7840f37a-13eb-4779-aa16-84bf10f7d351'; // WH-PLT1-RM, see infra/postgres/seed/dev_seed.sql
 
 void main() {
@@ -62,6 +64,7 @@ class _MetrockAppState extends State<MetrockApp> {
   late final ApiClient _salesApi;
   late final ApiClient _crmApi;
   late final ApiClient _fleetApi;
+  late final ApiClient _hrApi;
   late final SyncService _sync;
   final String _deviceId = const Uuid().v4();
 
@@ -74,12 +77,14 @@ class _MetrockAppState extends State<MetrockApp> {
     _salesApi = ApiClient(baseUrl: _devSalesBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _fleetApi = ApiClient(baseUrl: _devFleetBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
+    _hrApi = ApiClient(baseUrl: _devHrBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _sync = SyncService(db: _db, apiClients: {
       SyncModule.procurement: _procurementApi,
       SyncModule.manufacturing: _manufacturingApi,
       SyncModule.sales: _salesApi,
       SyncModule.crm: _crmApi,
       SyncModule.fleet: _fleetApi,
+      SyncModule.hr: _hrApi,
     })
       ..startWatchingConnectivity();
   }
@@ -103,6 +108,7 @@ class _MetrockAppState extends State<MetrockApp> {
         salesApi: _salesApi,
         crmApi: _crmApi,
         fleetApi: _fleetApi,
+        hrApi: _hrApi,
         deviceId: _deviceId,
         sync: _sync,
       ),
@@ -124,6 +130,7 @@ class _HomeScreen extends StatelessWidget {
     required this.salesApi,
     required this.crmApi,
     required this.fleetApi,
+    required this.hrApi,
     required this.deviceId,
     required this.sync,
   });
@@ -134,13 +141,14 @@ class _HomeScreen extends StatelessWidget {
   final ApiClient salesApi;
   final ApiClient crmApi;
   final ApiClient fleetApi;
+  final ApiClient hrApi;
   final String deviceId;
   final SyncService sync;
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 5,
+      length: 6,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Metrock ERP'),
@@ -152,6 +160,7 @@ class _HomeScreen extends StatelessWidget {
               Tab(text: 'Agents'),
               Tab(text: 'Customers'),
               Tab(text: 'Vehicles'),
+              Tab(text: 'Employees'),
             ],
           ),
           actions: [
@@ -165,6 +174,7 @@ class _HomeScreen extends StatelessWidget {
             _AgentsTab(db: db, api: salesApi, crmApi: crmApi, deviceId: deviceId, sync: sync),
             _CustomersTab(db: db, api: crmApi, deviceId: deviceId, sync: sync),
             _VehiclesTab(db: db, api: fleetApi, deviceId: deviceId, sync: sync),
+            _EmployeesTab(db: db, api: hrApi, deviceId: deviceId, sync: sync),
           ],
         ),
       ),
@@ -737,6 +747,144 @@ class _VehicleDetailScreen extends StatelessWidget {
                 ),
               ),
               child: const Text('Log Fuel'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Sixth tab (HR/Payroll slice): Employees list, fetched directly online —
+/// same simplification as every other master-data list in this app.
+/// Tapping an employee opens a detail screen with the one offline-
+/// capturable HR action: clocking in/out.
+class _EmployeesTab extends StatefulWidget {
+  const _EmployeesTab({required this.db, required this.api, required this.deviceId, required this.sync});
+  final AppDatabase db;
+  final ApiClient api;
+  final String deviceId;
+  final SyncService sync;
+
+  @override
+  State<_EmployeesTab> createState() => _EmployeesTabState();
+}
+
+class _EmployeesTabState extends State<_EmployeesTab> {
+  List<Map<String, dynamic>>? _employees;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final employees = await widget.api.fetchEmployees();
+      setState(() => _employees = employees);
+    } catch (e) {
+      setState(() => _loadError = 'Could not reach server (offline?): $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadError != null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!)));
+    }
+    if (_employees == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return ListView.builder(
+      itemCount: _employees!.length,
+      itemBuilder: (context, index) {
+        final employee = _employees![index];
+        final grade = employee['grade'] as Map<String, dynamic>?;
+        return ListTile(
+          title: Text('${employee['employeeCode']} — ${employee['fullName']}'),
+          subtitle: Text('${employee['department']} · ${grade?['gradeName'] ?? employee['gradeCode']}'),
+          onTap: () => _openEmployeeDetail(employee),
+        );
+      },
+    );
+  }
+
+  void _openEmployeeDetail(Map<String, dynamic> employee) {
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(
+            builder: (_) => _EmployeeDetailScreen(db: widget.db, deviceId: widget.deviceId, employee: employee),
+          ),
+        )
+        .then((_) => widget.sync.syncNow());
+  }
+}
+
+/// Landing point for the one offline-capturable HR action this slice
+/// implements: attendance clock-in/out. Unlike every other capture screen
+/// in this app, there's no form to fill in — just which button was
+/// tapped — so this calls AttendanceRepository directly instead of going
+/// through a Cubit (see that repository's doc comment for why).
+class _EmployeeDetailScreen extends StatefulWidget {
+  const _EmployeeDetailScreen({required this.db, required this.deviceId, required this.employee});
+  final AppDatabase db;
+  final String deviceId;
+  final Map<String, dynamic> employee;
+
+  @override
+  State<_EmployeeDetailScreen> createState() => _EmployeeDetailScreenState();
+}
+
+class _EmployeeDetailScreenState extends State<_EmployeeDetailScreen> {
+  late final AttendanceRepository _repository =
+      AttendanceRepository(db: widget.db, deviceId: widget.deviceId);
+  bool _submitting = false;
+
+  Future<void> _clock(String eventType) async {
+    setState(() => _submitting = true);
+    try {
+      await _repository.recordAttendance(
+        employeeId: widget.employee['employeeId'] as String,
+        eventType: eventType,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Saved locally. Will sync automatically once connected.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e'), backgroundColor: Colors.red));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final grade = widget.employee['grade'] as Map<String, dynamic>?;
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.employee['fullName'] as String)),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '${widget.employee['employeeCode']} · ${widget.employee['department']} · '
+              '${grade?['gradeName'] ?? widget.employee['gradeCode']}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 24),
+            FilledButton(
+              onPressed: _submitting ? null : () => _clock('CLOCK_IN'),
+              child: const Text('Clock In'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton(
+              onPressed: _submitting ? null : () => _clock('CLOCK_OUT'),
+              child: const Text('Clock Out'),
             ),
           ],
         ),

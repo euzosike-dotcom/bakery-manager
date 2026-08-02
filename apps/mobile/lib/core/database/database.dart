@@ -26,6 +26,7 @@ part 'database.g.dart';
   ActivitiesLocal,
   TripLogsLocal,
   FuelRecordsLocal,
+  AttendanceLogsLocal,
   OutboxEvents,
   SyncCursors,
 ])
@@ -33,7 +34,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -46,10 +47,13 @@ class AppDatabase extends _$AppDatabase {
           // ActivitiesLocal's doc comment). v4 -> v5: added the Fleet
           // module's two local tables (TripLogs, FuelRecords — Vehicles/
           // Drivers have no local table, same "fetched directly online"
-          // simplification). All purely additive so far (no existing
-          // table changed shape) — a real column/type change on an
-          // existing table would need a proper step-by-step migration
-          // here instead of blanket createTable calls.
+          // simplification). v5 -> v6: added the HR module's one local
+          // table (AttendanceLogs — Employees have no local table, same
+          // simplification; Payroll Runs have no offline path at all). All
+          // purely additive so far (no existing table changed shape) — a
+          // real column/type change on an existing table would need a
+          // proper step-by-step migration here instead of blanket
+          // createTable calls.
           if (from < 2) {
             await m.createTable(productionBatchesLocal);
             await m.createTable(productionConsumptionLocal);
@@ -65,6 +69,9 @@ class AppDatabase extends _$AppDatabase {
           if (from < 5) {
             await m.createTable(tripLogsLocal);
             await m.createTable(fuelRecordsLocal);
+          }
+          if (from < 6) {
+            await m.createTable(attendanceLogsLocal);
           }
         },
       );

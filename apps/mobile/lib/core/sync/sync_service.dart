@@ -15,7 +15,7 @@ import 'api_client.dart';
 /// before), so the client does the routing itself for now, one entry per
 /// module. Adding a module means adding one entry here, not restructuring
 /// this class.
-enum SyncModule { procurement, manufacturing, sales, crm, fleet }
+enum SyncModule { procurement, manufacturing, sales, crm, fleet, hr }
 
 const _pushModuleForEntityType = {
   'goods_receipt': SyncModule.procurement,
@@ -25,6 +25,7 @@ const _pushModuleForEntityType = {
   'activity': SyncModule.crm,
   'trip_log': SyncModule.fleet,
   'fuel_record': SyncModule.fleet,
+  'attendance_log': SyncModule.hr,
 };
 
 const _pullModuleForEntity = {
@@ -36,6 +37,7 @@ const _pullModuleForEntity = {
   'activities': SyncModule.crm,
   'trip_logs': SyncModule.fleet,
   'fuel_records': SyncModule.fleet,
+  'attendance_logs': SyncModule.hr,
 };
 
 /// Drives both directions of SDD §2.2:
@@ -82,6 +84,7 @@ class SyncService {
       await _pullEntity('activities');
       await _pullEntity('trip_logs');
       await _pullEntity('fuel_records');
+      await _pullEntity('attendance_logs');
     } finally {
       _running = false;
     }
@@ -183,6 +186,8 @@ class SyncService {
           await _applyTripLogsPage(page.records);
         case 'fuel_records':
           await _applyFuelRecordsPage(page.records);
+        case 'attendance_logs':
+          await _applyAttendanceLogsPage(page.records);
       }
 
       await _writeCursor(entity, page.nextCursor);
@@ -368,6 +373,26 @@ class SyncService {
             fuelCost: double.parse(row['fuel_cost'].toString()),
             expenseClaimReference: Value(row['expense_claim_reference'] as String?),
             orphanedTripReference: Value(row['orphaned_trip_reference'] as bool),
+            clientEventId: row['client_event_id'] as String,
+            createdOffline: Value(row['created_offline'] as bool),
+            syncSeq: Value(int.parse(row['sync_seq'].toString())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  Future<void> _applyAttendanceLogsPage(List<Map<String, dynamic>> rows) async {
+    await db.batch((batch) {
+      for (final row in rows) {
+        batch.insert(
+          db.attendanceLogsLocal,
+          AttendanceLogsLocalCompanion.insert(
+            attendanceLogId: row['attendance_log_id'] as String,
+            employeeId: row['employee_id'] as String,
+            eventType: row['event_type'] as String,
+            eventTime: DateTime.parse(row['event_time'] as String),
             clientEventId: row['client_event_id'] as String,
             createdOffline: Value(row['created_offline'] as bool),
             syncSeq: Value(int.parse(row['sync_seq'].toString())),

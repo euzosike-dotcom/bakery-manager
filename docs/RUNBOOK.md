@@ -1237,3 +1237,199 @@ kill-the-backend:
   vehicles — each variance is investigated individually via
   `maintenance_requests`, but nothing aggregates them into the
   "operational KPI" framing the SDD describes.
+
+# Vertical Slice #6 — HR & Revenue-Based Payroll (2026-08-01)
+
+The fifth of the original 15 PRD/FRS modules (docs/SDD.md §3.F), after
+Procurement, Manufacturing, Sales, and Logistics/Fleet — the last one
+before Governance is the only original module left unbuilt.
+
+Scope decisions stated up front, same discipline as every prior slice:
+`leave_requests` (named in the SDD's data-model list) is NOT built — the
+SDD itself says attendance clock-in/out is "the ONLY meaningfully
+offline-relevant surface in this module", and leave requests feed neither
+the offline-sync pattern nor the revenue-based payroll calculation this
+slice exists to prove. `salary_structures` (also named) is implemented as
+`salary_grades` (a per-grade `grade_weight`) — a separate fixed-base-
+salary table would contradict "revenue-based" payroll, which computes
+salary FROM the pool, not from a stored structure.
+
+## 1. Apply migrations + seed data
+
+```
+docker compose -f infra/docker-compose.yml exec -T postgres psql -U metrock -d metrock_erp \
+  -f infra/postgres/migrations/019_hr_payroll.sql \
+  -f infra/postgres/migrations/020_hr_rls_and_role.sql
+psql ... -f infra/postgres/seed/hr_payroll_seed.sql
+```
+
+Schema: `plants` gains a `payroll_ratio` column (tenant-configurable per
+plant, not a new config table — Plant Revenue and the resulting pool are
+both plant-scoped); `salary_grades` (per-grade `grade_weight`);
+`employees`; `attendance_logs` (the one offline-capturable entity, with
+**two independent dedupe layers** — see §2); `payroll_runs` and
+`payroll_records` (the calculate/post split — see §2).
+
+Real bug caught and fixed before this ever ran: the first draft of
+`attendance_logs.time_bucket` was a `GENERATED ALWAYS AS (date_trunc('hour',
+event_time)) STORED` column. Postgres rejected it — `date_trunc(text,
+timestamptz)` depends on the session's `TimeZone` setting and so isn't
+IMMUTABLE, which a generated column requires. Fixed by making
+`time_bucket` a plain column, computed in hr-service (floor to the hour,
+in UTC) at insert time instead — no less correct, since hr-service is the
+only writer of this table. (Also: cleaning up after the failed first
+attempt taught a `psql -c` lesson — multiple semicolon-separated
+statements in one `-c` string run as ONE implicit transaction; a later
+statement failing rolls back everything earlier in that same call. Fixed
+by re-running via separate `-c` invocations instead of one batched
+cleanup script.)
+
+RLS + role smoke test, same pattern as every prior module — wrong tenant
+-> 0, correct tenant -> row counts. Confirmed before any service code was
+written.
+
+## 2. Scaffold hr-service (NestJS, port 3007)
+
+Same `packages/backend-common` pattern. `attendance_logs` has a
+`bigserial sync_seq`, so its insert uses raw `$executeRaw`/`$queryRaw`
+(not Prisma's typed `.create()`) — same reason as every prior sync-
+tracked table; `payroll_runs`/`payroll_records` have no `sync_seq` (no
+offline path at all) so Prisma's typed client works fine for those and
+was used directly, no raw SQL needed.
+
+**Attendance dedupe has two independent layers**, both in
+`AttendanceService.recordAttendance`:
+  1. The standard `client_event_id` idempotency check (first, as always).
+  2. Matrix Scenario #8's `(employee_id, event_type, time_bucket)` dedupe
+     — a genuinely DIFFERENT event (different `client_event_id`,
+     different device) representing the same real-world clock-in, e.g. a
+     phone and a plant kiosk both firing for one employee. Implemented as
+     `INSERT ... ON CONFLICT (tenant_id, employee_id, event_type,
+     time_bucket) DO NOTHING RETURNING attendance_log_id` — an empty
+     result means the bucket was already claimed, so the handler looks up
+     the existing row and returns its ID with a message noting the
+     dedupe, still `ACKED` (SDD's framing is "prevents double-counted
+     attendance", not "reject the second scan").
+
+**Revenue-Based Payroll** (`PayrollService`) is deliberately split into
+two separate, both online-only actions — matching the SDD's explicit
+requirement that payroll posting is "online-only, finance-gated... never
+executed offline, never eligible for offline queuing":
+  - `calculateRun` — Plant Revenue (confirmed `sales_orders` at the plant
+    within the period — read directly off sales-service's table, NOT
+    derived from `journal_entries`, because `sales.order_fulfilled.v1`
+    never carries `plant_id` through to `journal_lines
+    .cost_center_plant_id`, which is NULL for every sales-revenue posting
+    so far) x Payroll Ratio = Payroll Pool; Payroll Pool x each active
+    employee's Grade Weight = their gross/net salary (no statutory
+    deduction engine — `total_deductions` is always 0, a real, documented
+    gap). One run per (plant, period) — enforced by a UNIQUE constraint,
+    surfaced as a clean 400 on retry.
+  - `postRun` — the actual `posted_to_books_flag = true` action, online-
+    only, mirrors `NcrService.verifyNcr`'s submit-then-verify split
+    (Slice #3). Publishes `payroll.run_posted.v1` with
+    `net_salary_total` = Σ `payroll_records.net_salary` for the run.
+
+Grade weights are NOT validated to sum to 1.0 across a plant's active
+employees — tenant-configurable master data, same "configured, not
+enforced" pattern as Fleet's fuel-variance tolerance. A misconfigured set
+of weights simply under- or over-allocates the pool.
+
+## 3. Extend ledger-service (Go)
+
+One line in `sourceModuleFor`:
+```go
+case "payroll.run_posted.v1":
+    return "hr"
+```
+New GL accounts (migration 019): 5340 Salary/Wages Expense (EXPENSE), 2130
+Payroll Payable (LIABILITY). Posting rule: `payroll.run_posted.v1` -> Dr
+5340 / Cr 2130, amount = `net_salary_total`. Restarted ledger-service the
+careful way (killed both the `go run` wrapper and compiled binary PIDs).
+
+## 4. Prove the backend chain — all via curl
+
+Seed data: PLT-1 `payroll_ratio = 0.15`; GRADE_A (Ngozi Adeyemi) weight
+`0.6`, GRADE_B (Tunde Bakare) weight `0.3`; PLT-1 had `307500` in
+confirmed `sales_orders` for 2026-08 from earlier slices' own testing.
+
+```
+curl -X POST localhost:3007/payroll-runs -d '{"plantId":"<plt1>","payrollPeriod":"2026-08"}'
+# -> plantRevenue 307500, payrollRatioUsed 0.15, totalPayrollPool 46125
+#    (307500 * 0.15) — records: Ngozi grossSalary 27675 (46125*0.6),
+#    Tunde grossSalary 13837.5 (46125*0.3). Math confirmed exactly.
+
+# Duplicate run for the same plant+period -> 400 (UNIQUE constraint)
+
+curl -X POST localhost:3007/payroll-runs/<id>/post
+# -> netSalaryTotal 41512.5 (27675 + 13837.5)
+# Posting the same run again -> 400 (already POSTED)
+
+# confirmed directly in Postgres:
+#   source_module='hr': Dr 5340 41512.50 / Cr 2130 41512.50
+
+# Scenario #8: two clock-ins for the same employee, same hour, two
+# DIFFERENT clientEventIds (simulating two devices)
+curl -X POST localhost:3007/attendance-logs -d '{"employeeId":"<emp>","eventType":"CLOCK_IN"}'
+curl -X POST localhost:3007/attendance-logs -d '{"employeeId":"<emp>","eventType":"CLOCK_IN"}'
+# -> both ACKED with the SAME serverEntityId; second response says
+#    "...deduped, not double-counted (Matrix Scenario #8)."
+#    Confirmed only 1 row actually exists in attendance_logs.
+```
+
+## 5. Flutter: Employees tab, Clock In/Clock Out
+
+Sixth tab (`_EmployeesTab`), fetched directly online via `ApiClient
+.fetchEmployees()`. Employee detail screen exposes the one offline-
+capturable HR action: **Clock In** / **Clock Out**. New
+`AttendanceLogsLocal` Drift table (schema v5 -> v6), new `SyncModule.hr`
+push/pull routing (`attendance_log` push, `attendance_logs` pull).
+
+Unlike every other capture screen in this app, attendance has no form
+fields to fill in — just which button was tapped — so `_EmployeeDetail
+Screen` calls `AttendanceRepository` directly instead of going through a
+Cubit/State pair (nothing to manage beyond a submit-in-flight boolean,
+handled with plain `setState`). First deliberate deviation from the
+Cubit-per-feature pattern in this app, and a reasoned one: every other
+capture screen actually has quantity/price/notes/mileage/litres fields to
+track; this one doesn't.
+
+**Proven exactly like every prior slice** — real device, real
+kill-the-backend:
+
+1. Employees tab correctly listed both seeded employees with their real
+   grade names (Senior Staff / Junior Staff) — confirms live server data,
+   not a fixture.
+2. **Killed `hr-service` entirely.** Opened Tunde Bakare's detail screen,
+   tapped **Clock In** — "Saved locally...". Confirmed directly in the
+   device's SQLite file that the `attendance_log` outbox row existed with
+   `sync_status = 'PENDING'` before the backend ever came back up.
+3. Restarted `hr-service`, tapped sync. Outbox row flipped to `ACKED`;
+   confirmed server-side it landed with `created_offline = true`.
+
+## Known gaps still open after this pass (HR & Payroll)
+
+- **`leave_requests` and true `salary_structures` are not built** — see
+  this section's opening scope note; both are named in the SDD's data-
+  model list but neither is required to prove the offline-capture or
+  revenue-based-payroll patterns this slice exists to demonstrate.
+- **No statutory deduction engine** — `payroll_records.total_deductions`
+  is always 0 (no tax tables, pension, or other withholding logic). A
+  real deployment would need this before any real payslip could be cut.
+- **Grade weights are not validated to sum to 1.0** — tenant-configurable
+  master data, not enforced; a misconfigured set of weights silently
+  under- or over-allocates the pool rather than erroring.
+- **No employee/attendance CRUD UI** — employees are seeded directly via
+  SQL, same as every other module's master data at this stage. There's
+  also no UI to view an employee's own attendance history, or a
+  supervisor view of clock-in/out records across employees.
+- **No payroll run review/approval UI** — `calculateRun` and `postRun`
+  were only proven via curl; a real finance user would want a screen
+  showing the calculated `payroll_records` before tapping "post."
+- **Plant Revenue is read from `sales_orders`, not `journal_entries`** —
+  a direct consequence of `sales.order_fulfilled.v1` never carrying
+  `plant_id` through to `journal_lines.cost_center_plant_id` (still NULL
+  for every sales-revenue posting in this platform). Fixing that gap
+  upstream (in sales-service's event payload) would let Plant Revenue be
+  derived from the GL itself, which is the more architecturally
+  consistent long-term answer.

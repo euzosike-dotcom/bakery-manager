@@ -82,6 +82,15 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// Employees (with salary grade), for the Employees tab. Same online-
+  /// only simplification as every other master-data list in this app —
+  /// no local cache table.
+  Future<List<Map<String, dynamic>>> fetchEmployees() async {
+    final res = await _client.get(Uri.parse('$baseUrl/employees'), headers: _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
   /// Pushes a batch of outbox events. Returns the per-event result array —
   /// callers must inspect each entry's `status`, a 200 response does not
   /// mean every event was accepted (SDD §2.2: push is per-event ack/reject).

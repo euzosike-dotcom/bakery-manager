@@ -221,6 +221,26 @@ class FuelRecordsLocal extends Table {
   Set<Column> get primaryKey => {fuelRecordId};
 }
 
+/// Local mirror of `attendance_logs` (migration 019_hr_payroll.sql) — the
+/// one offline-capturable entity in the HR & Revenue-Based Payroll module
+/// (SDD §3.F). Same offline-write / reconcile-on-pull pattern as
+/// ActivitiesLocal. `time_bucket` isn't tracked locally — Matrix Scenario
+/// #8 dedupe is entirely server-side (AttendanceService), and the client
+/// never needs to know whether a given clock event ended up deduped to
+/// display "saved locally".
+class AttendanceLogsLocal extends Table {
+  TextColumn get attendanceLogId => text()(); // client-generated UUID
+  TextColumn get employeeId => text()();
+  TextColumn get eventType => text()();
+  DateTimeColumn get eventTime => dateTime()();
+  TextColumn get clientEventId => text()();
+  BoolColumn get createdOffline => boolean().withDefault(const Constant(true))();
+  IntColumn get syncSeq => integer().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {attendanceLogId};
+}
+
 /// Per-table pull cursor (SDD §2.2: "client persists last_synced_cursor per
 /// cached table"). `entity` is e.g. "goods_receipts" or "purchase_orders".
 class SyncCursors extends Table {

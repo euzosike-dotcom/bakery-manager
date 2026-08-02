@@ -4,11 +4,11 @@ Multi-tenant, offline-first ERP platform for food manufacturing enterprises.
 Metrock Enterprises is Tenant Zero. Full architecture: see
 [`docs/SDD.md`](docs/SDD.md) (copied from the System Design Documentation).
 
-## Status: Six modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital, Accounting, CRM, and Logistics/Fleet
+## Status: Seven modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital, Accounting, CRM, Logistics/Fleet, and HR/Payroll
 
-This repo implements **six modules**, each proving the architecture
-before scaling out to the remaining original-PRD modules (HR/Payroll,
-Governance) or further platform extensions:
+This repo implements **seven modules**, each proving the architecture
+before scaling out to the one remaining original-PRD module (Governance)
+or further platform extensions:
 
 ```
 Flutter (offline capture: GRN / production batch / sales order / NCR)
@@ -28,13 +28,14 @@ Flutter (offline capture: GRN / production batch / sales order / NCR)
 | Accounting (Zoho Books/QuickBooks equivalent) | `backend/accounting-service` | 3004 | `accounting.bill_paid.v1` -> Dr Accounts Payable / Cr Cash and Bank; `accounting.invoice_payment_received.v1` -> Dr Cash and Bank / Cr Agent Wallet |
 | CRM | `backend/crm-service` | 3005 | none — no financial postings, integrates via `sales_orders.customer_id` |
 | Logistics, Fleet & Fuel Management | `backend/fleet-service` | 3006 | `fleet.fuel_recorded.v1` -> Dr Vehicle Fuel Expense / Cr Cash and Bank; `fleet.maintenance_completed.v1` -> Dr Vehicle Maintenance Expense / Cr Accounts Payable |
+| HR & Revenue-Based Payroll | `backend/hr-service` | 3007 | `payroll.run_posted.v1` -> Dr Salary/Wages Expense / Cr Payroll Payable |
 
-All six domain services share the exact same pattern: tenant-context
+All seven domain services share the exact same pattern: tenant-context
 middleware + Prisma tenant-scoping helper (extracted into
 `packages/backend-common` once a third service needed them — see "Known
 gaps" history below), and a least-privilege Postgres role
 (`procurement_svc`, `manufacturing_svc`, `sales_svc`, `accounting_svc`,
-`crm_svc`, `fleet_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
+`crm_svc`, `fleet_svc`, `hr_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
 introduces the platform's first real-time business gate: an order is
 blocked server-side, synchronously, if it would exceed an agent's
 available trading capital (`trading_capital_ledger`, computed live, never
@@ -65,6 +66,20 @@ between "mechanical fault" and "fuel diversion" per the SDD. See
 including Matrix Scenario #9 (a fuel record referencing a since-cancelled
 trip is still accepted and posted, only flagged for review).
 
+HR & Revenue-Based Payroll is the fifth original-PRD module and the last
+before Governance (docs/SDD.md §3.F) — attendance clock-in/out is the
+platform's next offline-capturable entity, with two independent dedupe
+layers (the standard client-event idempotency, plus Matrix Scenario #8's
+time-bucket dedupe for two devices firing the same real-world clock-in).
+Payroll itself is revenue-based, not a fixed salary structure: Payroll
+Pool = Plant Revenue x Payroll Ratio, Employee Salary = Pool x Grade
+Weight, split into an online-only calculate step and a separate online-
+only post-to-books step per the SDD's explicit "never offline, never
+queued" requirement for payroll. See `docs/RUNBOOK.md`'s "Vertical Slice
+#6" section for the full trail, including the exact math verified end to
+end and a real Postgres gotcha (a `GENERATED ALWAYS AS (date_trunc(...))
+STORED` column rejected for depending on session TimeZone, not IMMUTABLE).
+
 ## Repo layout
 
 ```
@@ -75,6 +90,7 @@ backend/
   accounting-service/    # NestJS: Vendor Bills/Customer Invoices (auto-generated via own Kafka consumer), manual journals, reports
   crm-service/           # NestJS: Customers (CRUD-lite), Opportunities, Activities (offline-capturable), Sync Gateway
   fleet-service/         # NestJS: Vehicles/Drivers, Trip Logs + Fuel Records (offline-capturable), Maintenance Requests, Sync Gateway
+  hr-service/            # NestJS: Employees, Attendance (offline-capturable, two-layer dedupe), revenue-based Payroll Runs, Sync Gateway
   ledger-service/        # Go: Kafka consumer, double-entry posting engine (all modules)
 packages/
   backend-common/        # Shared tenant-context middleware, Kafka producer, Prisma tenant-scoping helper
@@ -83,7 +99,7 @@ infra/
   postgres/migrations/   # SQL migrations, RLS policies
   docker-compose.yml     # Postgres, Redpanda, Redis, MinIO for local dev
 apps/
-  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR/activity/trip/fuel capture client
+  mobile/                # Flutter: offline-first GRN + batch + sales order/NCR/activity/trip/fuel/attendance capture client
 docs/
   SDD.md                 # Full system design documentation
   RUNBOOK.md             # Verified bring-up + verification trail for every module
@@ -176,6 +192,25 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 - **`maintenance_requests` has no Flutter UI** — listing and completing a
   request (the one online-only back-office action in this module, mirrors
   NCR verification) were only proven via curl.
+- **HR's `leave_requests` and true `salary_structures` are not built** —
+  the SDD itself scopes attendance clock-in/out as the only offline-
+  relevant surface in this module; neither is required to prove that
+  pattern or the revenue-based payroll calculation.
+- **No statutory payroll deduction engine** — `payroll_records
+  .total_deductions` is always 0 (no tax/pension tables). A real
+  deployment needs this before any real payslip could be cut.
+- **HR's grade weights aren't validated to sum to 1.0** — tenant-
+  configurable, not enforced; a misconfigured set silently under- or
+  over-allocates the payroll pool rather than erroring.
+- **No employee/attendance/payroll-review UI beyond capture** — employees
+  are seeded directly via SQL; there's no attendance history view and no
+  screen to review a calculated payroll run before posting it (both
+  `calculateRun`/`postRun` were only proven via curl).
+- **Plant Revenue is read from `sales_orders`, not `journal_entries`** —
+  `sales.order_fulfilled.v1` never carries `plant_id` through to
+  `journal_lines.cost_center_plant_id` (still NULL for every sales-
+  revenue posting in this platform), so HR's payroll calculation reads
+  sales-service's table directly instead of deriving revenue from the GL.
 
 ### Resolved during development (kept for history, not hidden)
 
