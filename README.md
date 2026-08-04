@@ -4,11 +4,13 @@ Multi-tenant, offline-first ERP platform for food manufacturing enterprises.
 Metrock Enterprises is Tenant Zero. Full architecture: see
 [`docs/SDD.md`](docs/SDD.md) (copied from the System Design Documentation).
 
-## Status: Seven modules verified end-to-end — Procurement GRN, Manufacturing/Yield, Sales & Agent Capital, Accounting, CRM, Logistics/Fleet, and HR/Payroll
+## Status: All 15 original PRD/FRS modules covered, plus two platform extensions — verified end-to-end
 
-This repo implements **seven modules**, each proving the architecture
-before scaling out to the one remaining original-PRD module (Governance)
-or further platform extensions:
+This repo implements **eight modules** — Procurement GRN,
+Manufacturing/Yield, Sales & Agent Capital, Accounting, CRM,
+Logistics/Fleet, HR/Payroll, and Governance & Master Data — completing
+every module named in the original PRD/FRS (Accounting and CRM are
+platform extensions added on top, not part of that original 15):
 
 ```
 Flutter (offline capture: GRN / production batch / sales order / NCR)
@@ -29,13 +31,15 @@ Flutter (offline capture: GRN / production batch / sales order / NCR)
 | CRM | `backend/crm-service` | 3005 | none — no financial postings, integrates via `sales_orders.customer_id` |
 | Logistics, Fleet & Fuel Management | `backend/fleet-service` | 3006 | `fleet.fuel_recorded.v1` -> Dr Vehicle Fuel Expense / Cr Cash and Bank; `fleet.maintenance_completed.v1` -> Dr Vehicle Maintenance Expense / Cr Accounts Payable |
 | HR & Revenue-Based Payroll | `backend/hr-service` | 3007 | `payroll.run_posted.v1` -> Dr Salary/Wages Expense / Cr Payroll Payable |
+| Governance & Master Data | `backend/governance-service` | 3008 | none — control plane only (RBAC, hash-chained audit log, posting-authority enforcement) |
 
-All seven domain services share the exact same pattern: tenant-context
-middleware + Prisma tenant-scoping helper (extracted into
+Seven of the eight domain services share the exact same pattern: tenant-
+context middleware + Prisma tenant-scoping helper (extracted into
 `packages/backend-common` once a third service needed them — see "Known
 gaps" history below), and a least-privilege Postgres role
 (`procurement_svc`, `manufacturing_svc`, `sales_svc`, `accounting_svc`,
-`crm_svc`, `fleet_svc`, `hr_svc`) so RLS is a real backstop, not a no-op. Sales & Agent Capital
+`crm_svc`, `fleet_svc`, `hr_svc`, `governance_svc`) so RLS is a real
+backstop, not a no-op. Sales & Agent Capital
 introduces the platform's first real-time business gate: an order is
 blocked server-side, synchronously, if it would exceed an agent's
 available trading capital (`trading_capital_ledger`, computed live, never
@@ -80,6 +84,23 @@ queued" requirement for payroll. See `docs/RUNBOOK.md`'s "Vertical Slice
 end and a real Postgres gotcha (a `GENERATED ALWAYS AS (date_trunc(...))
 STORED` column rejected for depending on session TimeZone, not IMMUTABLE).
 
+Governance & Master Data (docs/SDD.md §3.A) closes out the original
+15-module PRD/FRS. Unusually, most of its schema (`plants`, `warehouses`,
+`roles`, `users`, `approval_matrix`, `reason_codes`, `audit_log`) already
+existed from Slice #1 — every other service has read it as cross-module
+master data since day one. This slice adds the two things nothing had
+implemented yet: hash-chained tamper-evident audit logging, and posting-
+authority enforcement (deny + audit + alert on any bypass attempt) per
+the SDD's §4.2 "Governance warning." It's also the first module with no
+financial trigger, no Kafka producer, and no Flutter offline-capture
+surface at all — the SDD is explicit that governance master data is
+pull-only and never edited offline. See `docs/RUNBOOK.md`'s "Vertical
+Slice #7" section for the full trail, including a genuine bug the hash-
+chain verification surfaced (Postgres `jsonb` silently reorders object
+keys on storage, breaking a naive hash round-trip) and direct proof that
+the append-only audit trail can't be altered even by the Postgres
+superuser.
+
 ## Repo layout
 
 ```
@@ -91,6 +112,7 @@ backend/
   crm-service/           # NestJS: Customers (CRUD-lite), Opportunities, Activities (offline-capturable), Sync Gateway
   fleet-service/         # NestJS: Vehicles/Drivers, Trip Logs + Fuel Records (offline-capturable), Maintenance Requests, Sync Gateway
   hr-service/            # NestJS: Employees, Attendance (offline-capturable, two-layer dedupe), revenue-based Payroll Runs, Sync Gateway
+  governance-service/    # NestJS: Plants/Warehouses/Roles/Users/Reason Codes/Approval Matrix (CRUD-lite), hash-chained Audit Log, posting-authority enforcement
   ledger-service/        # Go: Kafka consumer, double-entry posting engine (all modules)
 packages/
   backend-common/        # Shared tenant-context middleware, Kafka producer, Prisma tenant-scoping helper
@@ -211,6 +233,29 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `journal_lines.cost_center_plant_id` (still NULL for every sales-
   revenue posting in this platform), so HR's payroll calculation reads
   sales-service's table directly instead of deriving revenue from the GL.
+- **Posting-authority enforcement isn't retrofitted into the other seven
+  domain services** — `governance-service`'s `AuthorizationService`
+  correctly authorizes/denies/audits/alerts given a user and a required
+  permission, but no other service's posting endpoint (GRN, batch close,
+  sales order, bill/invoice payment, fuel/maintenance, payroll run) calls
+  it before posting yet. The mechanism is proven; wiring it into every
+  place the SDD says it should gate is real, out-of-scope work.
+- **`approval_matrix` thresholds are configured but not enforced** — real,
+  seeded, queryable data, but no service routes a transaction through
+  approval-level checks based on it.
+- **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
+  an authorization bypass attempt is a structured log line, not an actual
+  email/Slack/pager integration.
+- **Prefer `json` over `jsonb` (or canonicalize explicitly) for anything
+  that must round-trip byte-identical** — `AuditService`'s hash chain
+  initially failed verification because Postgres `jsonb` reorders object
+  keys by `(length, then lexicographic)` on storage, so a naive
+  `JSON.stringify` of a value read back from a `jsonb` column never
+  matches the same value's serialization before it was stored. Fixed with
+  a canonical (deterministically key-sorted) serialization applied on
+  both sides — see `docs/RUNBOOK.md`'s "Vertical Slice #7" for the full
+  story. Worth knowing before the next feature that hashes or signs
+  anything stored as `jsonb`.
 
 ### Resolved during development (kept for history, not hidden)
 

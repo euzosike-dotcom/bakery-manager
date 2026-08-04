@@ -44,6 +44,7 @@ const _devSalesBaseUrl = 'http://localhost:3003';
 const _devCrmBaseUrl = 'http://localhost:3005';
 const _devFleetBaseUrl = 'http://localhost:3006';
 const _devHrBaseUrl = 'http://localhost:3007';
+const _devGovernanceBaseUrl = 'http://localhost:3008';
 const _devWarehouseId = '7840f37a-13eb-4779-aa16-84bf10f7d351'; // WH-PLT1-RM, see infra/postgres/seed/dev_seed.sql
 
 void main() {
@@ -65,6 +66,7 @@ class _MetrockAppState extends State<MetrockApp> {
   late final ApiClient _crmApi;
   late final ApiClient _fleetApi;
   late final ApiClient _hrApi;
+  late final ApiClient _governanceApi;
   late final SyncService _sync;
   final String _deviceId = const Uuid().v4();
 
@@ -78,6 +80,10 @@ class _MetrockAppState extends State<MetrockApp> {
     _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _fleetApi = ApiClient(baseUrl: _devFleetBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
     _hrApi = ApiClient(baseUrl: _devHrBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
+    _governanceApi = ApiClient(baseUrl: _devGovernanceBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
+    // Governance has no SyncModule entry at all — master data is
+    // pull-only per SDD §3.A, never edited offline, so there's nothing
+    // for the sync engine to push/pull for this module.
     _sync = SyncService(db: _db, apiClients: {
       SyncModule.procurement: _procurementApi,
       SyncModule.manufacturing: _manufacturingApi,
@@ -109,6 +115,7 @@ class _MetrockAppState extends State<MetrockApp> {
         crmApi: _crmApi,
         fleetApi: _fleetApi,
         hrApi: _hrApi,
+        governanceApi: _governanceApi,
         deviceId: _deviceId,
         sync: _sync,
       ),
@@ -131,6 +138,7 @@ class _HomeScreen extends StatelessWidget {
     required this.crmApi,
     required this.fleetApi,
     required this.hrApi,
+    required this.governanceApi,
     required this.deviceId,
     required this.sync,
   });
@@ -142,13 +150,14 @@ class _HomeScreen extends StatelessWidget {
   final ApiClient crmApi;
   final ApiClient fleetApi;
   final ApiClient hrApi;
+  final ApiClient governanceApi;
   final String deviceId;
   final SyncService sync;
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 6,
+      length: 7,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Metrock ERP'),
@@ -161,6 +170,7 @@ class _HomeScreen extends StatelessWidget {
               Tab(text: 'Customers'),
               Tab(text: 'Vehicles'),
               Tab(text: 'Employees'),
+              Tab(text: 'Users'),
             ],
           ),
           actions: [
@@ -175,6 +185,7 @@ class _HomeScreen extends StatelessWidget {
             _CustomersTab(db: db, api: crmApi, deviceId: deviceId, sync: sync),
             _VehiclesTab(db: db, api: fleetApi, deviceId: deviceId, sync: sync),
             _EmployeesTab(db: db, api: hrApi, deviceId: deviceId, sync: sync),
+            _UsersTab(api: governanceApi),
           ],
         ),
       ),
@@ -886,6 +897,103 @@ class _EmployeeDetailScreenState extends State<_EmployeeDetailScreen> {
               onPressed: _submitting ? null : () => _clock('CLOCK_OUT'),
               child: const Text('Clock Out'),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Seventh tab (Governance slice): Users list, fetched directly online.
+/// Unlike every other tab, this one is PURELY read-only by design, not
+/// just "no offline cache yet" — SDD §3.A is explicit that governance
+/// master data (plants, warehouses, roles, users, approval matrix, reason
+/// codes) is "pull-only, read-cached... never edited offline", since it
+/// changes rarely and its correctness is safety-critical. There is no
+/// capture repository, no Drift table, and no SyncModule.governance entry
+/// anywhere in this app for that reason — not an oversight, a scope match
+/// to what the SDD actually calls for.
+class _UsersTab extends StatefulWidget {
+  const _UsersTab({required this.api});
+  final ApiClient api;
+
+  @override
+  State<_UsersTab> createState() => _UsersTabState();
+}
+
+class _UsersTabState extends State<_UsersTab> {
+  List<Map<String, dynamic>>? _users;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final users = await widget.api.fetchUsers();
+      setState(() => _users = users);
+    } catch (e) {
+      setState(() => _loadError = 'Could not reach server (offline?): $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadError != null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!)));
+    }
+    if (_users == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    return ListView.builder(
+      itemCount: _users!.length,
+      itemBuilder: (context, index) {
+        final user = _users![index];
+        final role = user['role'] as Map<String, dynamic>?;
+        return ListTile(
+          title: Text(user['fullName'] as String),
+          subtitle: Text('${user['email']} · ${role?['roleName'] ?? 'No role assigned'}'),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => _UserDetailScreen(user: user)),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Read-only detail: the user's role and its RBAC permission flags
+/// (docs/SDD.md §4.2: `can_approve`/`can_post`/`can_override`) — the same
+/// flags AuthorizationService checks server-side. No actions on this
+/// screen at all, matching the tab's read-only scope.
+class _UserDetailScreen extends StatelessWidget {
+  const _UserDetailScreen({required this.user});
+  final Map<String, dynamic> user;
+
+  @override
+  Widget build(BuildContext context) {
+    final role = user['role'] as Map<String, dynamic>?;
+    final plant = user['plant'] as Map<String, dynamic>?;
+    return Scaffold(
+      appBar: AppBar(title: Text(user['fullName'] as String)),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('${user['email']}', style: Theme.of(context).textTheme.titleMedium),
+            if (plant != null) Text('Plant: ${plant['plantName']}'),
+            const SizedBox(height: 16),
+            Text('Role: ${role?['roleName'] ?? 'None assigned'}', style: Theme.of(context).textTheme.titleSmall),
+            if (role != null) ...[
+              const SizedBox(height: 8),
+              Text('Can approve: ${role['canApprove']}'),
+              Text('Can post: ${role['canPost']}'),
+              Text('Can override: ${role['canOverride']}'),
+            ],
           ],
         ),
       ),

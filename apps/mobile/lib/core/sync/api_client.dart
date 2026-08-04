@@ -91,6 +91,17 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// Users (with role + plant), for the Users tab. Governance master data
+  /// is pull-only / read-cached per SDD §3.A — deliberately never
+  /// editable offline, unlike every other module's tab, so there's no
+  /// corresponding capture repository or Drift table at all, not just no
+  /// local cache.
+  Future<List<Map<String, dynamic>>> fetchUsers() async {
+    final res = await _client.get(Uri.parse('$baseUrl/users'), headers: _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
   /// Pushes a batch of outbox events. Returns the per-event result array —
   /// callers must inspect each entry's `status`, a 200 response does not
   /// mean every event was accepted (SDD §2.2: push is per-event ack/reject).

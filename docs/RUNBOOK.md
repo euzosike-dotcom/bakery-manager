@@ -1433,3 +1433,180 @@ kill-the-backend:
   upstream (in sales-service's event payload) would let Plant Revenue be
   derived from the GL itself, which is the more architecturally
   consistent long-term answer.
+
+# Vertical Slice #7 — Governance & Master Data (2026-08-03)
+
+The sixth and final of the original 15 PRD/FRS modules (docs/SDD.md
+§3.A). Unlike every prior slice, most of this module's SCHEMA already
+existed — `tenant_registry`, `plants`, `warehouses`, `roles`, `users`,
+`approval_matrix`, `reason_codes`, and `audit_log` were all created back
+in Slice #1 (migrations 002-003) precisely because every other service
+has needed them as read-only cross-module master data since day one.
+What this slice actually builds is the two things nothing had implemented
+yet: an OWNING service for that data, and the two mechanisms the SDD
+specifically calls for in §4.2 — hash-chained tamper-evident audit
+logging, and posting-authority enforcement with a mandatory audit trail +
+alert on any bypass attempt.
+
+Also unlike every prior slice: **no financial trigger, no Kafka producer,
+no ledger-service extension, no Flutter offline-capture surface.** SDD
+§3.A is explicit on both counts — "Financial Trigger: None directly...
+this module supplies the control plane" and "master data is pull-only,
+read-cached... never edited offline." governance-service is the first
+domain service in this platform with no `KafkaModule` at all.
+
+## 1. Apply migrations + seed data
+
+```
+docker compose -f infra/docker-compose.yml exec -T postgres psql -U metrock -d metrock_erp \
+  -f infra/postgres/migrations/021_governance_role.sql
+psql ... -f infra/postgres/seed/governance_seed.sql
+```
+
+The only schema CHANGE (not addition) in this slice: `audit_log` gains a
+`chain_seq bigserial` column. `prev_hash`/`record_hash` columns existed
+since Slice #1 but nothing had ever written to the table (confirmed 0
+rows before this migration) — a deterministic per-insert ordering is
+needed to know which row is "previous" when computing a new row's
+`prev_hash` and when walking the chain to verify it, and `event_time`
+alone isn't safe for that (two inserts in the same millisecond would
+tie). Safe to add only because the table was genuinely empty.
+
+`governance_svc` is deliberately the only role in this platform NOT
+granted UPDATE on a table it owns — `audit_log` gets SELECT+INSERT only,
+on top of the append-only RULEs from migration 003. Belt-and-suspenders:
+the RULE already turns any UPDATE/DELETE into a no-op regardless of role,
+but not even holding the privilege is a stronger statement about what
+this service is allowed to do to its own audit trail.
+
+Seed data reuses the three roles already seeded in Slice #1
+(STORES_CLERK: no permissions; PROCUREMENT_MGR: can_approve+can_post;
+FINANCE_CONTROLLER: all three) rather than inventing new ones — their
+distinct permission combinations turn out to be exactly what's needed to
+exercise the authorization-check pattern below. Adds a two-tier
+`approval_matrix` (Procurement PO thresholds) and three `reason_codes`
+(including `UNAUTHORIZED_POSTING_ATTEMPT`, used automatically, never
+user-supplied).
+
+## 2. Scaffold governance-service (NestJS, port 3008)
+
+Same `packages/backend-common` pattern, no `KafkaModule` (first service
+without one). CRUD-lite (create+list) for Plants, Warehouses, Roles,
+Users, Reason Codes, Approval Matrix — these tables have been read-only
+cross-module master data since Slice #1; this is the first time any
+service actually WRITES to them.
+
+**Hash-chained audit log** (`AuditService`) — every row's `record_hash`
+commits to its own content AND the previous row's hash, so altering any
+historical row breaks every subsequent link. `verifyChain` recomputes the
+whole chain from scratch and compares against each stored hash — this is
+the actual tamper-evidence check, not just a read.
+
+**A real bug, found and fixed during this pass, not hypothetical**: the
+first version of `verifyChain` failed on the very first row ever
+inserted — `record_hash does not match recomputed hash of this record's
+content`. Root cause: `old_value_snapshot`/`new_value_snapshot` are
+stored as Postgres `jsonb`, which does **not** preserve original key
+order — its binary storage format reorders top-level object keys by
+`(length, then lexicographic)` when read back. Confirmed directly:
+```sql
+SELECT new_value_snapshot::text FROM audit_log WHERE chain_seq=1;
+-- inserted as {"requiredPermission":..., "roleCode":..., "result":...}
+-- read back as  {"result":..., "roleCode":..., "requiredPermission":...}
+```
+So the hash computed at insert time (from the pre-jsonb-round-trip
+object) could never match the hash recomputed at verify time (from the
+jsonb-reordered object read back from Postgres) — a structural
+mismatch, not tampering. Fixed with a `canonicalize()` helper
+(recursively sorts object keys before `JSON.stringify`) applied
+identically on both the insert-time hash and the verify-time
+recomputation, so the hash depends only on content, never on incidental
+key order. Lesson worth generalizing: prefer plain `json` over `jsonb`
+(or canonicalize explicitly) for any column whose exact serialized bytes
+need to round-trip identically, e.g. anything feeding a hash or
+signature — `jsonb`'s normalization is a feature for querying/indexing
+and a hazard for exactly this use case.
+
+**Posting-authority enforcement** (`AuthorizationService`, SDD §4.2's
+"Governance warning") — given a user and a required permission
+(`can_approve`/`can_post`/`can_override`), correctly authorizes a role
+that has it, and correctly DENIES + AUDITS (with `override_flag = true`
+and `reason_code = 'UNAUTHORIZED_POSTING_ATTEMPT'`, never silently) + logs
+an "ALERT:"-prefixed line (this platform's stand-in for a real alerting
+pipeline — no email/Slack/pager integration exists anywhere, same kind of
+documented stub as `TenantContextMiddleware` standing in for Keycloak) +
+throws 403, for a role that doesn't. This is the one place in the whole
+platform that check is actually implemented — the other seven domain
+services' posting endpoints do NOT call it before posting; retrofitting
+that is real, out-of-scope work (see "Known gaps"), not something this
+slice assumes is already true elsewhere.
+
+## 3. Prove the backend chain — all via curl
+
+```
+curl -X POST localhost:3008/authorization-check -d '{
+  "userId": "<stores-clerk>", "requiredPermission": "can_post",
+  "moduleName": "PROCUREMENT", "recordIdRef": "PO-TEST-001"
+}'
+# -> HTTP 403; server log shows "ALERT: user=... role=STORES_CLERK
+#    attempted can_post ... without authority — audited with override_flag=true"
+
+curl -X POST localhost:3008/authorization-check -d '{
+  "userId": "<procurement-mgr>", "requiredPermission": "can_post", ...
+}'
+# -> {"authorized": true, "roleCode": "PROCUREMENT_MGR"}
+
+curl localhost:3008/audit-log/verify
+# -> {"valid": true, "totalRecords": 2}   (after the canonicalize fix)
+```
+
+**Proved the append-only guarantee is real, not assumed** — attempted a
+direct `UPDATE audit_log SET reason_code = 'TAMPERED' ...` as the
+`metrock` superuser itself: `UPDATE 0`, row unchanged. The RULE from
+migration 003 intercepts UPDATE regardless of role, superuser included.
+
+**Proved `verifyChain` actually detects corruption, not just echoes
+`valid: true`** — inserted a row directly via SQL with a deliberately
+wrong `prev_hash` (bypassing the service entirely, simulating what a
+schema-level tamper attempt would look like): `verify` correctly returned
+`{"valid": false, "reason": "prev_hash does not match the preceding
+record's record_hash", ...}`. Since `audit_log` truly cannot be
+UPDATE/DELETEd, cleaned this up the only way possible — `TRUNCATE` (not
+blocked by the RULE, which only intercepts UPDATE/DELETE) — and re-ran
+the two legitimate authorization-check calls to leave a real, valid,
+inspectable chain behind rather than a poisoned one.
+
+## 4. Flutter: Users tab (read-only)
+
+Seventh tab (`_UsersTab`), fetched directly online via `ApiClient
+.fetchUsers()`. Tapping a user shows their role's SDD §4.2 permission
+flags (`can_approve`/`can_post`/`can_override`) — the same flags
+`AuthorizationService` checks server-side. **No capture screen, no Drift
+table, no `SyncModule` entry at all** — the first tab in this app that is
+purely read-only by design, not "no offline cache yet." SDD §3.A's
+Offline Strategy is explicit that governance master data is pull-only,
+read-cached, never edited offline; there is nothing to push or pull for
+this module, so nothing was built to push or pull.
+
+## Known gaps still open after this pass (Governance)
+
+- **Posting-authority enforcement isn't retrofitted into the other seven
+  domain services** — GRN, batch close, sales order, bill/invoice
+  payment, fuel/maintenance, and payroll-run posting endpoints do NOT
+  call `AuthorizationService.checkAuthority` before posting. What's
+  proven is the mechanism itself (it correctly authorizes/denies/audits/
+  alerts), not that it's wired into every place the SDD says it should
+  gate. Real, honest, out-of-scope work for a future pass.
+- **`approval_matrix` thresholds are configured but not enforced** —
+  seeded, queryable, real data, but no service actually routes a
+  transaction through approval-level checks based on it yet.
+- **Tenant provisioning is out of scope** — `tenant_registry` is
+  read-only from governance-service; tenants are still seeded directly,
+  same as every environment so far.
+- **No Keycloak integration** — `users.keycloak_subject_id` exists as a
+  column but nothing populates or validates it; auth is still the
+  `TenantContextMiddleware` stub documented since Slice #1.
+- **No real alerting pipeline** — the "raise a real-time alert"
+  requirement (SDD §4.2) is a structured log line, not an actual
+  email/Slack/pager integration. Swapping it for one is a single-method
+  change in `AuthorizationService`.

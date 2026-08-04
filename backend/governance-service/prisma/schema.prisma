@@ -1,0 +1,169 @@
+// Prisma schema for the Governance & Master Data domain service. Mirrors
+// infra/postgres/migrations/002_tenant_registry.sql, 003_governance.sql,
+// and 021_governance_role.sql — see procurement-service/prisma/schema
+// .prisma's header comment for why this is generate-only, not the
+// migration source of truth.
+//
+// Unlike every other service's schema, most of these tables PRE-DATE this
+// service (Slice #1) — they were read-only cross-module master data
+// copied into every other service's own Prisma schema. This is the first
+// time any service actually OWNS (writes) them.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Read-only — tenant provisioning is out of scope for this slice (see
+// migration 021's grant comment).
+model TenantRegistry {
+  tenantId              String   @id @map("tenant_id") @db.Uuid
+  tenantCode            String   @map("tenant_code")
+  tenantName            String   @map("tenant_name")
+  isolationTier         String   @map("isolation_tier")
+  region                String
+  defaultCurrency       String   @map("default_currency")
+  financeConnectorType  String   @map("finance_connector_type")
+  status                String
+  provisionedAt         DateTime @map("provisioned_at")
+
+  @@map("tenant_registry")
+}
+
+model Plant {
+  tenantId                  String   @map("tenant_id") @db.Uuid
+  plantId                   String   @map("plant_id") @db.Uuid
+  plantCode                 String   @map("plant_code")
+  plantName                 String   @map("plant_name")
+  plantType                 String?  @map("plant_type")
+  plantRole                 String?  @map("plant_role")
+  address                   String?
+  state                     String?
+  region                    String?
+  plantStatus               String   @map("plant_status")
+  capacityKgPerDay          Decimal? @map("capacity_kg_per_day") @db.Decimal(14, 2)
+  supportsAgentSales        Boolean  @map("supports_agent_sales")
+  supportsProduction        Boolean  @map("supports_production")
+  supportsInterplantTransfer Boolean @map("supports_interplant_transfer")
+  payrollRatio              Decimal  @map("payroll_ratio") @db.Decimal(5, 4)
+  createdAt                 DateTime @map("created_at")
+
+  warehouses Warehouse[]
+  users      User[]
+
+  @@id([tenantId, plantId])
+  @@unique([tenantId, plantCode])
+  @@map("plants")
+}
+
+model Warehouse {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  warehouseId    String   @map("warehouse_id") @db.Uuid
+  warehouseCode  String   @map("warehouse_code")
+  warehouseName  String   @map("warehouse_name")
+  plantId        String   @map("plant_id") @db.Uuid
+  warehouseType  String?  @map("warehouse_type")
+  isActive       Boolean  @map("is_active")
+  createdAt      DateTime @map("created_at")
+
+  plant Plant @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+
+  @@id([tenantId, warehouseId])
+  @@unique([tenantId, warehouseCode])
+  @@map("warehouses")
+}
+
+model Role {
+  tenantId     String  @map("tenant_id") @db.Uuid
+  roleId       String  @map("role_id") @db.Uuid
+  roleCode     String  @map("role_code")
+  roleName     String  @map("role_name")
+  roleCategory String? @map("role_category")
+  canApprove   Boolean @map("can_approve")
+  canPost      Boolean @map("can_post")
+  canOverride  Boolean @map("can_override")
+  isActive     Boolean @map("is_active")
+
+  users User[]
+
+  @@id([tenantId, roleId])
+  @@unique([tenantId, roleCode])
+  @@map("roles")
+}
+
+model User {
+  tenantId          String    @map("tenant_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  employeeCode      String?   @map("employee_code")
+  fullName          String    @map("full_name")
+  email             String
+  roleId            String?   @map("role_id") @db.Uuid
+  plantId           String?   @map("plant_id") @db.Uuid
+  department        String?
+  userStatus        String    @map("user_status")
+  mfaEnabled        Boolean   @map("mfa_enabled")
+  keycloakSubjectId String?   @map("keycloak_subject_id")
+  lastLogin         DateTime? @map("last_login")
+
+  role  Role?  @relation(fields: [tenantId, roleId], references: [tenantId, roleId])
+  plant Plant? @relation(fields: [tenantId, plantId], references: [tenantId, plantId])
+
+  @@id([tenantId, userId])
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+model ApprovalMatrix {
+  tenantId              String   @map("tenant_id") @db.Uuid
+  approvalMatrixId      String   @map("approval_matrix_id") @db.Uuid
+  moduleName            String   @map("module_name")
+  transactionType        String   @map("transaction_type")
+  plantId               String?  @map("plant_id") @db.Uuid
+  thresholdMin          Decimal  @map("threshold_min") @db.Decimal(14, 2)
+  thresholdMax          Decimal? @map("threshold_max") @db.Decimal(14, 2)
+  approvalLevel1RoleId  String?  @map("approval_level_1_role_id") @db.Uuid
+  approvalLevel2RoleId  String?  @map("approval_level_2_role_id") @db.Uuid
+  approvalLevel3RoleId  String?  @map("approval_level_3_role_id") @db.Uuid
+  isActive              Boolean  @map("is_active")
+
+  @@id([tenantId, approvalMatrixId])
+  @@map("approval_matrix")
+}
+
+model ReasonCode {
+  tenantId      String  @map("tenant_id") @db.Uuid
+  reasonCodeId  String  @map("reason_code_id") @db.Uuid
+  reasonCode    String  @map("reason_code")
+  reasonGroup   String  @map("reason_group")
+  description   String?
+  isActive      Boolean @map("is_active")
+
+  @@id([tenantId, reasonCodeId])
+  @@unique([tenantId, reasonCode])
+  @@map("reason_codes")
+}
+
+model AuditLog {
+  tenantId         String   @map("tenant_id") @db.Uuid
+  auditLogId       String   @map("audit_log_id") @db.Uuid
+  eventTime        DateTime @map("event_time")
+  userId           String?  @map("user_id") @db.Uuid
+  moduleName       String   @map("module_name")
+  recordIdRef      String   @map("record_id_ref")
+  actionType       String   @map("action_type")
+  oldValueSnapshot Json?    @map("old_value_snapshot")
+  newValueSnapshot Json?    @map("new_value_snapshot")
+  ipOrDevice       String?  @map("ip_or_device")
+  overrideFlag     Boolean  @map("override_flag")
+  reasonCode       String?  @map("reason_code")
+  prevHash         String?  @map("prev_hash")
+  recordHash       String   @map("record_hash")
+  chainSeq         BigInt   @map("chain_seq")
+
+  @@id([tenantId, auditLogId])
+  @@map("audit_log")
+}
