@@ -4,10 +4,19 @@
 # resulting Keycloak subject id back into users.keycloak_subject_id, the
 # column the schema has carried unused since migration 003_governance.sql.
 #
-# Idempotent: safe to re-run after adding new seed users. Existing Keycloak
-# users are matched by email and left untouched (password included — never
-# re-set on an existing user, so a hand-changed dev password survives
-# re-runs).
+# Also sets a `local_user_id` attribute (= this same Postgres user_id),
+# mapped onto a `local_user_id` token claim by realm-export.json's "tenant"
+# client scope. Only governance-service owns the `users` table (see its
+# KeycloakAuthMiddleware for the DB-lookup variant); every OTHER service's
+# Postgres role has no grant on `users` at all, so their KeycloakAuthMiddleware
+# (packages/backend-common's shared, dependency-free version) reads
+# `local_user_id` straight off the verified token instead of doing a DB
+# lookup — no new grants or per-service Prisma models needed.
+#
+# Idempotent: safe to re-run after adding new seed users, and safely
+# backfills local_user_id onto users created before this attribute existed.
+# Password is only ever set at creation, never touched on an existing user,
+# so a hand-changed dev password survives re-runs.
 #
 # Requires: curl, jq, and the metrock-erp-postgres-1 container running
 # (docker exec is used to run psql inside it, same pattern as every prior
@@ -67,10 +76,10 @@ while IFS='|' read -r tenant_id user_id email full_name; do
 
     payload=$(jq -n \
       --arg email "$email" --arg first "$first_name" --arg last "$last_name" \
-      --arg tenant "$tenant_id" --arg pass "$DEV_USER_PASSWORD" '{
+      --arg tenant "$tenant_id" --arg localUserId "$user_id" --arg pass "$DEV_USER_PASSWORD" '{
         username: $email, email: $email, firstName: $first, lastName: $last,
         enabled: true, emailVerified: true,
-        attributes: {tenant_id: [$tenant]},
+        attributes: {tenant_id: [$tenant], local_user_id: [$localUserId]},
         credentials: [{type: "password", value: $pass, temporary: false}]
       }')
 
@@ -80,9 +89,27 @@ while IFS='|' read -r tenant_id user_id email full_name; do
     existing_id=$(curl -sf -H "Authorization: Bearer $ADMIN_TOKEN" \
       "$KEYCLOAK_URL/admin/realms/$REALM/users?email=$(printf '%s' "$email" | jq -sRr @uri)&exact=true" \
       | jq -r '.[0].id')
-    echo "Created Keycloak user $email -> $existing_id (tenant $tenant_id, dev password: $DEV_USER_PASSWORD)"
+    echo "Created Keycloak user $email -> $existing_id (tenant $tenant_id, local_user_id $user_id, dev password: $DEV_USER_PASSWORD)"
   else
-    echo "Keycloak user $email already exists -> $existing_id"
+    # Existing user (e.g. seeded before local_user_id existed) — check
+    # whether the attribute is already correct, and if not, PUT back a
+    # FULL representation with it merged in. A partial PUT (only the
+    # attributes field) silently wipes every other field Keycloak doesn't
+    # see in the request body — email, firstName, enabled, emailVerified
+    # all included — found the hard way while debugging Phase 1, so this
+    # always fetches-merges-PUTs the complete object, never a fragment.
+    current=$(curl -sf -H "Authorization: Bearer $ADMIN_TOKEN" "$KEYCLOAK_URL/admin/realms/$REALM/users/$existing_id")
+    current_local_id=$(echo "$current" | jq -r '.attributes.local_user_id[0] // empty')
+
+    if [ "$current_local_id" != "$user_id" ]; then
+      updated=$(echo "$current" | jq --arg tenant "$tenant_id" --arg localUserId "$user_id" \
+        '.attributes = ((.attributes // {}) + {tenant_id: [$tenant], local_user_id: [$localUserId]})')
+      curl -sf -o /dev/null -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+        "$KEYCLOAK_URL/admin/realms/$REALM/users/$existing_id" -d "$updated"
+      echo "Keycloak user $email already existed -> $existing_id — backfilled local_user_id=$user_id"
+    else
+      echo "Keycloak user $email already exists -> $existing_id (local_user_id already correct)"
+    fi
   fi
 
   docker exec "$POSTGRES_CONTAINER" psql -U metrock -d metrock_erp -q -c \

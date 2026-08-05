@@ -1,6 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { TenantContextMiddleware } from '@metrock/backend-common';
+import { KeycloakAuthMiddleware } from '@metrock/backend-common';
 import { PrismaModule } from './common/prisma.module';
 import { KafkaModule } from './common/kafka.module';
 import { GovernanceModule } from './common/governance.module';
@@ -25,8 +25,14 @@ import { KafkaConsumerModule } from './kafka/kafka-consumer.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    // Only the HTTP surface needs stub-auth tenant resolution — the Kafka
-    // consumer gets tenantId straight from each event's own tenant_id field.
-    consumer.apply(TenantContextMiddleware).forRoutes('*');
+    // Phase 2 of the Keycloak retrofit — no exclusions needed here, unlike
+    // most other Phase 2 services: accounting-service has no SyncModule
+    // and none of its routes are called by the Flutter mobile app
+    // (confirmed against apps/mobile/lib/core/sync/api_client.dart's
+    // exact call list), matching the "Accounting has no Flutter UI"
+    // known gap. The Kafka consumer is unaffected either way — it gets
+    // tenantId straight from each event's own tenant_id field, never from
+    // HTTP middleware.
+    consumer.apply(KeycloakAuthMiddleware).forRoutes('*');
   }
 }

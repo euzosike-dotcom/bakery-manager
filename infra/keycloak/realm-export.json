@@ -40,6 +40,20 @@
             "jsonType.label": "String",
             "userinfo.token.claim": "true"
           }
+        },
+        {
+          "name": "local-user-id-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "local_user_id",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "local_user_id",
+            "jsonType.label": "String",
+            "userinfo.token.claim": "true"
+          }
         }
       ]
     }

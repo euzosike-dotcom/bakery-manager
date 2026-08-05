@@ -4,3 +4,4 @@ export * from './kafka-producer.service';
 export * from './prisma-tenant-scope';
 export * from './posting-authority.client';
 export * from './keycloak-auth';
+export * from './keycloak-auth.middleware';

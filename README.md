@@ -133,22 +133,35 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 
 ## Known gaps (intentionally out of scope for now)
 
-- **Auth is real Keycloak on governance-service only (Phase 1 of 4); the
-  other 7 services are still on the header stub.** A self-hosted Keycloak
-  (`infra/docker-compose.yml`, realm config in `infra/keycloak/`) now
-  issues signed JWTs with a custom `tenant_id` claim; governance-service's
-  `KeycloakAuthMiddleware` (`packages/backend-common`'s
-  `verifyKeycloakToken`, JWKS-verified) replaces `TenantContextMiddleware`
-  for every one of its user-facing routes. Its own
-  `/authorization-check` route deliberately keeps the OLD header stub —
-  that's a service-to-service endpoint (called by the other six services'
-  `PostingAuthorityClient`), and giving it real end-user auth is a
-  separate machine-to-machine (client-credentials) story, not part of
-  this phase. Rolling the same swap out to procurement/manufacturing/
-  sales/accounting/crm/fleet/hr-service (Phase 2), then the Flutter
-  mobile app via PKCE (Phase 3), is tracked, real, out-of-scope work —
-  see `docs/RUNBOOK.md`'s "Keycloak auth retrofit" section for the full
-  verification trail and the Phase 2-4 plan.
+- **Auth is real Keycloak on all 8 backend services now (Phase 2 of 4
+  done); only the Flutter mobile app is still on the header stub.** A
+  self-hosted Keycloak (`infra/docker-compose.yml`, realm config in
+  `infra/keycloak/`) issues signed JWTs carrying custom `tenant_id` and
+  `local_user_id` claims. Every service's user-facing HTTP surface now
+  runs through a real `KeycloakAuthMiddleware` instead of
+  `TenantContextMiddleware` — governance-service has its own DB-backed
+  variant (it owns the `users` table); the other 7 share one
+  dependency-free version in `packages/backend-common` that reads
+  `local_user_id` straight off the verified token (no DB grant needed,
+  since no other service's Postgres role has access to `users`).
+  A handful of routes deliberately KEEP the old header stub in each
+  service, because the Flutter mobile app calls them directly and
+  doesn't get a real Keycloak token until Phase 3 (PKCE): each service's
+  `/sync/push` + `/sync/pull`, plus one read-only master-data list route
+  per service (`GET /purchase-orders`, `/recipes`, `/agents`,
+  `/customers`, `/vehicles`, `/employees`, `/users` — one per module,
+  confirmed against `apps/mobile/lib/core/sync/api_client.dart`'s exact
+  call list, not assumed). `accounting-service` needs no exclusions at
+  all — it has no `SyncModule` and none of its routes are mobile-called.
+  governance-service's own `/authorization-check` also keeps the stub —
+  a service-to-service endpoint (called by the other services'
+  `PostingAuthorityClient`), and real machine-to-machine auth
+  (client-credentials grant) is a separate, still out-of-scope story.
+  See `docs/RUNBOOK.md`'s "Keycloak auth retrofit" section for the full
+  verification trail, including a real regression Phase 1 shipped (it
+  broke the mobile Users tab) that got caught and fixed at the start of
+  Phase 2. Phase 3 (Flutter mobile via PKCE) and Phase 4 (docs cleanup,
+  drop the dead `roleCode`/`x-role-code` field) are still open.
 - **Finance connector** (Zoho Books / QuickBooks): `integration_queue` rows
   are written by the ledger service but nothing consumes them yet — the
   actual outbound connector is a separate build.

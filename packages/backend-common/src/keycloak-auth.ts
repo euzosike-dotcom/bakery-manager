@@ -10,13 +10,26 @@ export interface KeycloakAuthOptions {
 export interface VerifiedKeycloakIdentity {
   tenantId: string;
   keycloakSubjectId: string;
+  /**
+   * The LOCAL `users.user_id` this Keycloak identity maps to — a custom
+   * claim (`local_user_id`), sourced from a Keycloak user attribute set
+   * once at provisioning time by `infra/keycloak/seed-users.sh`, not
+   * resolved per-request. Optional: only governance-service owns the
+   * `users` table and does its own DB-backed resolution instead (see its
+   * KeycloakAuthMiddleware) — every other service's Postgres role has no
+   * grant on `users` at all, so `KeycloakAuthMiddleware` below reads this
+   * claim directly rather than requiring a new DB grant + Prisma model
+   * per service just to answer "who is this."
+   */
+  localUserId?: string;
   email?: string;
 }
 
 /**
  * Real Keycloak OIDC token verification (SDD §1.2) — replaces
  * TenantContextMiddleware's stub header trust for services migrated onto
- * it (Phase 1: governance-service only; see README "Known gaps").
+ * it (Phase 1: governance-service; Phase 2: the other 7 — see README
+ * "Known gaps" for what's left).
  *
  * Deliberately built on `jsonwebtoken` + `jwks-rsa`, not `jose` — this
  * monorepo compiles every backend service to CommonJS (see any service's
@@ -29,14 +42,11 @@ export interface VerifiedKeycloakIdentity {
  * built-in cache (keys rarely rotate) means this does NOT hit the
  * network on every request, only on a cache miss/expiry.
  *
- * `tenant_id` is a custom claim added via a protocol mapper on the
- * "tenant" client scope (infra/keycloak/realm-export.json) — NOT a
- * standard OIDC claim, so it's absent unless that scope is granted.
- * `sub` is Keycloak's internal user id, resolved to the LOCAL
- * `users.user_id` by the caller (see governance-service's
- * KeycloakAuthMiddleware) via the `keycloak_subject_id` column each
- * service's own Prisma client already owns — this function only proves
- * identity, it does not touch any service's database.
+ * `tenant_id` and `local_user_id` are custom claims added via protocol
+ * mappers on the "tenant" client scope (infra/keycloak/realm-export.json)
+ * — NOT standard OIDC claims, so both are absent unless that scope is
+ * granted. This function only proves identity (signature + issuer +
+ * claim extraction); it does not touch any service's database.
  */
 
 const jwksClientCache = new Map<string, JwksClient>();
@@ -97,5 +107,10 @@ export async function verifyKeycloakToken(
     throw new UnauthorizedException('Token missing sub claim');
   }
 
-  return { tenantId, keycloakSubjectId: payload.sub, email: payload['email'] as string | undefined };
+  return {
+    tenantId,
+    keycloakSubjectId: payload.sub,
+    localUserId: payload['local_user_id'] as string | undefined,
+    email: payload['email'] as string | undefined,
+  };
 }

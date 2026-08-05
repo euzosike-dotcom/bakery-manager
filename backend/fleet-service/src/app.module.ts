@@ -1,6 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { TenantContextMiddleware } from '@metrock/backend-common';
+import { TenantContextMiddleware, KeycloakAuthMiddleware } from '@metrock/backend-common';
 import { PrismaModule } from './common/prisma.module';
 import { KafkaModule } from './common/kafka.module';
 import { GovernanceModule } from './common/governance.module';
@@ -25,6 +25,16 @@ import { SyncModule } from './sync/sync.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(TenantContextMiddleware).forRoutes('*');
+    // Phase 2 of the Keycloak retrofit. GET /vehicles and /sync/push,
+    // /sync/pull stay on the OLD header stub — called directly by the
+    // Flutter mobile app (fetchVehicles(), and trip/fuel capture which
+    // dispatch through /sync/push per sync.service.ts's
+    // entityType==='trip_log'/'fuel_record' handling), which doesn't get
+    // a real Keycloak token until Phase 3. GET /maintenance-requests and
+    // POST /maintenance-requests/:id/complete (already
+    // posting-authority-gated — now also gets real Keycloak auth for the
+    // caller) both get real Keycloak auth.
+    consumer.apply(TenantContextMiddleware).forRoutes('vehicles', 'sync/push', 'sync/pull');
+    consumer.apply(KeycloakAuthMiddleware).exclude('vehicles', 'sync/push', 'sync/pull').forRoutes('*');
   }
 }

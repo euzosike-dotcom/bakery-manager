@@ -1909,8 +1909,8 @@ entire session's testing.
 
 ## Known gaps still open after this pass (Keycloak auth retrofit, Phase 1)
 
-- **7 of 8 backend services still use the header stub** — Phase 2,
-  tracked, not started.
+- ~~7 of 8 backend services still use the header stub~~ **Resolved** —
+  see "Keycloak auth retrofit — Phase 2" below.
 - **No Flutter mobile integration yet** — Phase 3. The mobile app still
   sends plain `x-tenant-id`/`x-user-id`/`x-device-id` headers
   (`apps/mobile/lib/core/sync/api_client.dart`).
@@ -1927,3 +1927,161 @@ entire session's testing.
 - **Dev password (`DevPassw0rd!`) is shared across all seeded users and
   committed in a script default** — fine for a local dev realm nobody
   else can reach, would need to change for anything shared.
+
+# Keycloak auth retrofit — Phase 2 (the other 7 services)
+
+Phase 1 proved the pattern on governance-service alone. This phase rolls
+`KeycloakAuthMiddleware` out to procurement/manufacturing/sales/
+accounting/crm/fleet/hr-service — the mechanical-sounding part of the
+retrofit that turned out to need the same care as Phase 1's one
+exclusion, just multiplied.
+
+## 0. A regression Phase 1 actually shipped, caught before Phase 2 could repeat it
+
+Auditing every service's real mobile dependency (see §1 below) surfaced
+that Phase 1's blanket `KeycloakAuthMiddleware.forRoutes('*')` on
+governance-service had ALREADY broken the Flutter app's read-only Users
+tab — `apps/mobile/lib/core/sync/api_client.dart`'s `fetchUsers()` calls
+`GET /users` with the old header stub, and nothing in Phase 1's own
+testing exercised that path (it tested curl-based auth and the
+cross-service posting-authority chain, never the mobile app itself).
+Fixed by adding `{ path: 'users', method: RequestMethod.GET }` to
+governance-service's stub-middleware exclusion, alongside
+`authorization-check` — `POST /users` (never called by mobile) keeps
+real Keycloak auth. This is the exact reason Phase 2 started with a full
+routes-vs-mobile-callers audit instead of repeating the same class of
+mistake seven more times.
+
+## 1. Mapping every service's actual mobile dependency, not assuming it
+
+`apps/mobile/lib/core/sync/api_client.dart` is the app's ENTIRE HTTP
+surface — exactly 9 methods, no more: 7 read-only master-data fetches
+(one per module: `fetchPurchaseOrders`, `fetchRecipes`, `fetchAgents`,
+`fetchCustomers`, `fetchVehicles`, `fetchEmployees`, `fetchUsers`) plus
+`syncPush`/`syncPull`. Every offline-capturable domain action
+(GRN receipt, production batch, sales order, NCR, activity, trip log,
+fuel record, attendance log) is dispatched through `/sync/push`'s
+`entityType` routing — confirmed by grepping every service's
+`sync.service.ts` for its dispatch table, not assumed from the
+architecture pattern. This means each domain controller's OWN direct
+POST route (e.g. `POST /goods-receipts`, `POST /ncr-collections`) is
+curl/dev-testing-only — the real mobile app never calls it — so gating
+those with real Keycloak auth doesn't touch mobile at all.
+
+Net result: exactly one GET list route plus `/sync/push` + `/sync/pull`
+per service must stay on the stub; everything else — including every
+route this platform's posting-authority retrofit already gates — gets
+real Keycloak auth. `accounting-service` has no `SyncModule` and no
+mobile-called route at all (matches its pre-existing "no Flutter UI"
+known gap), so it needed zero exclusions — the one genuinely mechanical
+case of the seven.
+
+## 2. A second design gap: only governance-service owns `users`
+
+Porting governance-service's `KeycloakAuthMiddleware` (DB lookup by
+`keycloak_subject_id`) verbatim doesn't work for the other 7 — grep
+confirmed none of their Postgres roles have any GRANT on `users` at all,
+and `accounting-service`'s own `schema.prisma` has no `User` model
+whatsoever. Adding a DB grant + Prisma model to 6 services just to
+answer "who is this" would have been real scope creep for what should be
+a middleware swap.
+
+Fixed by extending the JWT itself: a second custom claim,
+`local_user_id`, added via a new protocol mapper on the realm's `tenant`
+client scope, sourced from a new Keycloak user attribute set once by
+`seed-users.sh` (mirroring exactly how `tenant_id` already works) — not
+resolved per-request. This makes `packages/backend-common`'s new
+`KeycloakAuthMiddleware` fully dependency-free (no constructor
+injection, unlike governance-service's DB-backed version), so it's one
+truly shared class rather than a bespoke file duplicated into 7
+services. governance-service's own existing, already-shipped,
+already-tested DB-lookup middleware was left untouched — no reason to
+add risk to working code for a consistency win with no functional
+benefit this pass.
+
+**Backfilling existing users hit the exact same landmine as Phase 1**:
+existing Keycloak users (Amaka, Chidinma, seeded in Phase 1) needed
+`local_user_id` added retroactively. `seed-users.sh` now fetches the
+FULL existing user representation, merges the new attribute in, and PUTs
+the complete object back — never a partial `{"attributes": ...}` PUT,
+which (as Phase 1 discovered) silently wipes every field Keycloak
+doesn't see in the request body.
+
+**Keycloak's `--import-realm` does NOT re-import an already-existing
+realm on a plain container restart** (`docker compose restart`) —
+logged `Realm 'metrock' already exists. Import skipped` instead of the
+`OVERWRITE_EXISTING` strategy a fresh container CREATE uses. The new
+`local-user-id-mapper` protocol mapper was added directly via the Admin
+REST API to the live realm instead (and is already baked into
+`realm-export.json` for the next clean install) — same "live-patch, then
+make sure the exported file matches" pattern Phase 1 established.
+
+## 3. A NestJS route-matching gotcha: wildcard exclusions silently no-op
+
+The first attempt at excluding a service's sync routes used
+`exclude('purchase-orders', 'sync/(.*)')` — copying a regex-group
+pattern that seemed like the obvious way to match both `/sync/push` and
+`/sync/pull` in one entry. It compiled fine and threw no error, but
+`GET /sync/pull` came back `{"message":"Tenant context not resolved"}`
+instead of either succeeding (stub) or clearly failing (real auth) —
+neither middleware was actually running on that route: the string
+`'sync/(.*)'` was being matched (or not) as something other than what
+was intended, for both the inclusion AND exclusion sides. Fixed by
+listing the two real routes explicitly — `'sync/push'`, `'sync/pull'` —
+which is unambiguous and matches exactly the literal-string pattern that
+already worked correctly for governance-service's `'authorization-check'`
+exclusion. Applied consistently across all 6 remaining services rather
+than debugging path-to-regexp version behavior further.
+
+## 4. Method-precise exclusion where a path serves both reads and writes
+
+`crm-service`'s `/customers` has both `@Get()` (mobile's `fetchCustomers`)
+and `@Post()` (never called by mobile) at the same literal path — a bare
+string exclusion would have left the CREATE mutation on the header stub
+too, for no reason. Used `{ path: 'customers', method: RequestMethod.GET }`
+instead, verified precisely: `GET /customers` works via the old header,
+`POST /customers` requires (and correctly accepts) a real Bearer token.
+
+## 5. Verification — every service, both categories of route
+
+For each of the 7 services: confirmed the excluded mobile-facing routes
+(the one GET list + `/sync/push` + `/sync/pull`) still work with the OLD
+`x-tenant-id`/`x-device-id` headers exactly as before, and confirmed
+every OTHER route now rejects a request with no Bearer token and accepts
+one with a real Keycloak-issued token. Then re-ran the full posting-
+authority six-endpoint verification (NCR verify, vendor-bill payment,
+customer-invoice payment, manual journal entry, maintenance-request
+completion, payroll-run posting) end-to-end with real Bearer tokens
+authenticating the HTTP call itself (replacing the old
+`x-tenant-id`/`x-user-id` headers from that retrofit's original
+verification pass) — all six denied/authorized correctly, proving
+`local_user_id` threads all the way from the JWT through
+`PostingAuthorityClient` to governance-service's role resolution. Two of
+the six (customer-invoice payment, manual journal entry) were verified
+directly against accounting-service; the rest went through their real
+owning service (sales/fleet/hr), not simulated.
+
+`GET /audit-log/verify` afterward: `{"valid": true, "totalRecords": 41}`
+— hash chain intact through this entire pass, on top of everything
+Phase 1 had already written.
+
+## Known gaps still open after this pass (Keycloak auth retrofit, Phase 2)
+
+- **No Flutter mobile integration yet** — Phase 3, unchanged from Phase 1's
+  gap list. The excluded mobile-facing routes (one GET list + sync
+  push/pull per service) are exactly the surface Phase 3 needs to move
+  onto real PKCE-issued tokens.
+- **No machine-to-machine auth** — `/authorization-check` still trusts a
+  plain header from a caller assumed to be another backend service on
+  the same trusted network, unchanged from Phase 1's gap list.
+- **`roleCode`/`x-role-code` is still a dead field** — confirmed unused
+  by grep before Phase 1 even started; dropping it is Phase 4 cleanup,
+  still not done.
+- **Curl/dev-testing-only direct capture routes now require a real
+  token where they previously didn't** (`POST /goods-receipts`,
+  `/production-batches`, `/sales-orders`, `/ncr-collections`,
+  `/activities`, `/trip-logs`, `/fuel-records`, `/attendance-logs`) —
+  intentional, not a gap, but worth noting for anyone who scripted curl
+  verification against these directly in earlier RUNBOOK sections: those
+  exact commands now need `Authorization: Bearer <token>` instead of
+  `x-tenant-id`/`x-user-id`.
