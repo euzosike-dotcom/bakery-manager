@@ -27,6 +27,13 @@ dependencies:
   connectivity_plus: ^6.0.5
   uuid: ^4.5.1
 
+  # Auth (Phase 3 of the Keycloak retrofit, docs/RUNBOOK.md) — Authorization
+  # Code + PKCE via the system browser (AppAuth), tokens in the platform
+  # keychain/keystore. Replaces the x-tenant-id/x-user-id header stub every
+  # ApiClient sent since Slice #1.
+  flutter_appauth: ^7.0.1
+  flutter_secure_storage: ^9.2.2
+
   # State management
   flutter_bloc: ^8.1.6
   equatable: ^2.0.5

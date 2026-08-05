@@ -58,7 +58,17 @@ class SyncService {
   bool _running = false;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
 
+  /// Callers must not invoke this until the user is actually signed in
+  /// (Phase 3 of the Keycloak retrofit, docs/RUNBOOK.md) — connectivity
+  /// can regain at any moment, including before a session exists or
+  /// right after `logout()`, and every `ApiClient` call now goes through
+  /// `AuthClient.getValidAccessToken()`, which throws if nobody's logged
+  /// in. `main.dart` starts/stops this alongside its own auth-state
+  /// listener rather than SyncService knowing anything about auth
+  /// itself. Idempotent — calling this while already watching is a
+  /// harmless no-op, not a duplicate subscription.
   void startWatchingConnectivity() {
+    if (_connectivitySub != null) return;
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       final hasConnection = results.any((r) => r != ConnectivityResult.none);
       if (hasConnection) {
@@ -67,10 +77,30 @@ class SyncService {
     });
   }
 
+  /// Pairs with `startWatchingConnectivity()` — called on logout so a
+  /// connectivity change afterward can't trigger a sync attempt with no
+  /// session to authenticate it.
+  void stopWatchingConnectivity() {
+    _connectivitySub?.cancel();
+    _connectivitySub = null;
+  }
+
   void dispose() {
     _connectivitySub?.cancel();
   }
 
+  /// Both callers of this method — `startWatchingConnectivity()`'s
+  /// listener and the manual "Sync now" button in `main.dart` — invoke it
+  /// unawaited/fire-and-forget with no error handling of their own, so
+  /// any exception here needs to be handled inside this method, not
+  /// propagated. That includes `AuthClient.getValidAccessToken()`
+  /// throwing mid-sync if a token refresh fails with a genuine
+  /// `invalid_grant` (session expired between sync attempts) — this
+  /// class stays auth-agnostic (it doesn't know what threw, or why),
+  /// it just must never let ANY exception escape an unawaited call and
+  /// crash as an unhandled Future rejection. No error is surfaced to the
+  /// UI here — consistent with the manual sync button never having shown
+  /// one either, before this pass.
   Future<void> syncNow() async {
     if (_running) return;
     _running = true;
@@ -85,6 +115,8 @@ class SyncService {
       await _pullEntity('trip_logs');
       await _pullEntity('fuel_records');
       await _pullEntity('attendance_logs');
+    } catch (_) {
+      // See doc comment — deliberately swallowed, not rethrown.
     } finally {
       _running = false;
     }

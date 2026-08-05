@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
 
+import 'core/auth/auth_client.dart';
 import 'core/database/database.dart';
 import 'core/sync/api_client.dart';
 import 'core/sync/sync_service.dart';
@@ -32,12 +33,16 @@ import 'features/attendance/data/attendance_repository.dart';
 
 // Dev-only defaults for the vertical slice (docs/RUNBOOK.md). Production
 // wiring replaces these with real tenant discovery (subdomain/invite-code,
-// SDD §1.2) and Keycloak-issued identity instead of hardcoded constants.
+// SDD §1.2) — `tenant_id` itself no longer needs a client-side constant at
+// all as of Phase 3 of the Keycloak retrofit: it lives inside the access
+// token as a claim and every backend service derives it server-side.
 //
 // NOTE: on an Android emulator, `localhost` refers to the emulator itself,
 // not your host machine — use `10.0.2.2` instead. iOS Simulator and desktop
 // builds can use `localhost` directly.
-const _devTenantId = 'b17d9226-2a43-43eb-8c5e-a923637b23c5';
+const _devKeycloakIssuer = 'http://localhost:8080/realms/metrock';
+const _devKeycloakClientId = 'metrock-mobile';
+const _devKeycloakRedirectUrl = 'com.metrock.metrockMobile:/oauth2redirect';
 const _devProcurementBaseUrl = 'http://localhost:3001';
 const _devManufacturingBaseUrl = 'http://localhost:3002';
 const _devSalesBaseUrl = 'http://localhost:3003';
@@ -60,6 +65,7 @@ class MetrockApp extends StatefulWidget {
 
 class _MetrockAppState extends State<MetrockApp> {
   late final AppDatabase _db;
+  late final AuthClient _auth;
   late final ApiClient _procurementApi;
   late final ApiClient _manufacturingApi;
   late final ApiClient _salesApi;
@@ -70,17 +76,27 @@ class _MetrockAppState extends State<MetrockApp> {
   late final SyncService _sync;
   final String _deviceId = const Uuid().v4();
 
+  // null while `restoreSession()` is still running at app start — neither
+  // the login screen nor the tab UI should flash briefly before that
+  // resolves.
+  bool? _isLoggedIn;
+
   @override
   void initState() {
     super.initState();
     _db = AppDatabase();
-    _procurementApi = ApiClient(baseUrl: _devProcurementBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
-    _manufacturingApi = ApiClient(baseUrl: _devManufacturingBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
-    _salesApi = ApiClient(baseUrl: _devSalesBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
-    _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
-    _fleetApi = ApiClient(baseUrl: _devFleetBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
-    _hrApi = ApiClient(baseUrl: _devHrBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
-    _governanceApi = ApiClient(baseUrl: _devGovernanceBaseUrl, tenantId: _devTenantId, deviceId: _deviceId);
+    _auth = AuthClient(
+      issuer: _devKeycloakIssuer,
+      clientId: _devKeycloakClientId,
+      redirectUrl: _devKeycloakRedirectUrl,
+    );
+    _procurementApi = ApiClient(baseUrl: _devProcurementBaseUrl, deviceId: _deviceId, auth: _auth);
+    _manufacturingApi = ApiClient(baseUrl: _devManufacturingBaseUrl, deviceId: _deviceId, auth: _auth);
+    _salesApi = ApiClient(baseUrl: _devSalesBaseUrl, deviceId: _deviceId, auth: _auth);
+    _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, deviceId: _deviceId, auth: _auth);
+    _fleetApi = ApiClient(baseUrl: _devFleetBaseUrl, deviceId: _deviceId, auth: _auth);
+    _hrApi = ApiClient(baseUrl: _devHrBaseUrl, deviceId: _deviceId, auth: _auth);
+    _governanceApi = ApiClient(baseUrl: _devGovernanceBaseUrl, deviceId: _deviceId, auth: _auth);
     // Governance has no SyncModule entry at all — master data is
     // pull-only per SDD §3.A, never edited offline, so there's nothing
     // for the sync engine to push/pull for this module.
@@ -91,34 +107,56 @@ class _MetrockAppState extends State<MetrockApp> {
       SyncModule.crm: _crmApi,
       SyncModule.fleet: _fleetApi,
       SyncModule.hr: _hrApi,
-    })
-      ..startWatchingConnectivity();
+    });
+
+    // Deliberately NOT started here — every ApiClient call now goes
+    // through AuthClient.getValidAccessToken(), which throws if nobody's
+    // signed in yet, and connectivity can regain before restoreSession()
+    // even resolves. Started/stopped alongside the auth-state listener
+    // below instead, so a sync attempt can never fire without a session
+    // backing it.
+    _auth.authStateChanges.listen((loggedIn) {
+      if (loggedIn) {
+        _sync.startWatchingConnectivity();
+      } else {
+        _sync.stopWatchingConnectivity();
+      }
+      if (mounted) setState(() => _isLoggedIn = loggedIn);
+    });
+    _auth.restoreSession();
   }
 
   @override
   void dispose() {
     _sync.dispose();
     _db.close();
+    _auth.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final loggedIn = _isLoggedIn;
     return MaterialApp(
       title: 'Metrock ERP — Plant Tablet',
       theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
-      home: _HomeScreen(
-        db: _db,
-        procurementApi: _procurementApi,
-        manufacturingApi: _manufacturingApi,
-        salesApi: _salesApi,
-        crmApi: _crmApi,
-        fleetApi: _fleetApi,
-        hrApi: _hrApi,
-        governanceApi: _governanceApi,
-        deviceId: _deviceId,
-        sync: _sync,
-      ),
+      home: loggedIn == null
+          ? const _SplashScreen()
+          : loggedIn
+              ? _HomeScreen(
+                  db: _db,
+                  procurementApi: _procurementApi,
+                  manufacturingApi: _manufacturingApi,
+                  salesApi: _salesApi,
+                  crmApi: _crmApi,
+                  fleetApi: _fleetApi,
+                  hrApi: _hrApi,
+                  governanceApi: _governanceApi,
+                  deviceId: _deviceId,
+                  sync: _sync,
+                  onLogout: _auth.logout,
+                )
+              : _LoginScreen(auth: _auth),
     );
   }
 }
@@ -141,6 +179,7 @@ class _HomeScreen extends StatelessWidget {
     required this.governanceApi,
     required this.deviceId,
     required this.sync,
+    required this.onLogout,
   });
 
   final AppDatabase db;
@@ -153,6 +192,7 @@ class _HomeScreen extends StatelessWidget {
   final ApiClient governanceApi;
   final String deviceId;
   final SyncService sync;
+  final Future<void> Function() onLogout;
 
   @override
   Widget build(BuildContext context) {
@@ -175,6 +215,7 @@ class _HomeScreen extends StatelessWidget {
           ),
           actions: [
             IconButton(icon: const Icon(Icons.sync), onPressed: sync.syncNow, tooltip: 'Sync now'),
+            IconButton(icon: const Icon(Icons.logout), onPressed: onLogout, tooltip: 'Sign out'),
           ],
         ),
         body: TabBarView(
@@ -187,6 +228,91 @@ class _HomeScreen extends StatelessWidget {
             _EmployeesTab(db: db, api: hrApi, deviceId: deviceId, sync: sync),
             _UsersTab(api: governanceApi),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown briefly at app start while `AuthClient.restoreSession()` checks
+/// secure storage for a previous session — avoids flashing the login
+/// screen for an instant before a valid stored session is found.
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(body: Center(child: CircularProgressIndicator()));
+  }
+}
+
+/// Real Keycloak login (Phase 3 of the Keycloak retrofit, docs/RUNBOOK.md)
+/// — launches the system browser for Authorization Code + PKCE via
+/// `AuthClient.login()`. `_MetrockAppState`'s `authStateChanges` listener
+/// is what actually swaps this screen out for `_HomeScreen`, not
+/// anything in here — a successful `login()` call and the eventual
+/// `true` on that stream happen together, but only the latter drives
+/// navigation, so this screen only needs to show its own loading/error
+/// state while the browser round-trip is in flight.
+class _LoginScreen extends StatefulWidget {
+  const _LoginScreen({required this.auth});
+  final AuthClient auth;
+
+  @override
+  State<_LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<_LoginScreen> {
+  bool _signingIn = false;
+  String? _error;
+
+  Future<void> _signIn() async {
+    setState(() {
+      _signingIn = true;
+      _error = null;
+    });
+    try {
+      await widget.auth.login();
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Sign-in failed: $e');
+    } finally {
+      if (mounted) setState(() => _signingIn = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.factory, size: 64),
+              const SizedBox(height: 16),
+              const Text('Metrock ERP', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const Text('Sign in with your Metrock account to continue.'),
+              const SizedBox(height: 24),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                ),
+              FilledButton.icon(
+                onPressed: _signingIn ? null : _signIn,
+                icon: _signingIn
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.login),
+                label: Text(_signingIn ? 'Signing in…' : 'Sign In'),
+              ),
+            ],
+          ),
         ),
       ),
     );

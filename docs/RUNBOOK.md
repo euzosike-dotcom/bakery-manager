@@ -2067,10 +2067,8 @@ Phase 1 had already written.
 
 ## Known gaps still open after this pass (Keycloak auth retrofit, Phase 2)
 
-- **No Flutter mobile integration yet** — Phase 3, unchanged from Phase 1's
-  gap list. The excluded mobile-facing routes (one GET list + sync
-  push/pull per service) are exactly the surface Phase 3 needs to move
-  onto real PKCE-issued tokens.
+- ~~No Flutter mobile integration yet~~ **Resolved** — see "Keycloak auth
+  retrofit — Phase 3" below.
 - **No machine-to-machine auth** — `/authorization-check` still trusts a
   plain header from a caller assumed to be another backend service on
   the same trusted network, unchanged from Phase 1's gap list.
@@ -2085,3 +2083,145 @@ Phase 1 had already written.
   verification against these directly in earlier RUNBOOK sections: those
   exact commands now need `Authorization: Bearer <token>` instead of
   `x-tenant-id`/`x-user-id`.
+
+# Keycloak auth retrofit — Phase 3 (Flutter mobile via PKCE)
+
+Phases 1-2 got every backend service onto real Keycloak JWTs, but the
+Flutter mobile app itself (`apps/mobile`) still had no concept of a
+signed-in user at all — `main.dart` never even passed a `userId` to any
+`ApiClient` (confirmed by grep before starting: only `tenantId`/`deviceId`
+were ever set), which is *why* every online-only posting-authority-gated
+action in this platform has "no Flutter UI" as a documented known gap —
+there was no identity for a capture screen to act as. This phase gives
+the app a real login.
+
+## 1. `metrock-mobile` Keycloak client
+
+`infra/keycloak/realm-export.json` gains a second client alongside
+`metrock-test-client`: `publicClient: true`, `standardFlowEnabled: true`,
+`directAccessGrantsEnabled: false` (PKCE only, never password grant),
+`pkce.code.challenge.method: S256`, redirect URI
+`com.metrock.metrockMobile:/oauth2redirect` (matching the app's actual
+iOS bundle id, registered as a custom URL scheme in
+`ios/Runner/Info.plist`'s `CFBundleURLTypes` — Android's equivalent
+`appAuthRedirectScheme` manifest placeholder is wired in
+`android/app/build.gradle.kts` for correctness but not tested on an
+emulator this pass, since the iOS Simulator has been this project's
+established testing surface since Slice #1). `offline_access` is
+requested as an optional scope so the refresh token Keycloak issues is
+long-lived and revocable — the right shape for a native app that should
+stay signed in across restarts, not tied to a short browser-SSO session.
+
+## 2. `AuthClient` (`apps/mobile/lib/core/auth/auth_client.dart`)
+
+Wraps `flutter_appauth`'s `authorizeAndExchangeCode` (login),
+`endSession` (logout), and `token` with `refreshToken` (silent refresh),
+storing access/refresh/id tokens in `flutter_secure_storage` (platform
+keychain/keystore) rather than plain prefs. `getValidAccessToken()` is
+what every `ApiClient` call awaits before attaching its Authorization
+header — it only actually calls out to Keycloak when the current token
+is within 30 seconds of expiry, so it's not a network round-trip on
+every request.
+
+**Deliberate design choice, not an oversight**: a refresh that fails
+because the device is offline (or the realm is briefly unreachable)
+rethrows the underlying exception and does NOT clear the session or log
+the user out — going offline must never be indistinguishable from being
+signed out. Only a genuine `invalid_grant` from the server (the refresh
+token itself rejected — revoked, or expired past its own lifetime) clears
+the stored session and forces a real re-login. This mirrors the same
+"network failure ≠ auth failure" principle `PostingAuthorityClient`
+already established server-side in the posting-authority retrofit.
+
+## 3. `ApiClient` redesign
+
+`tenantId` and `userId` constructor params are gone entirely — both now
+live inside the JWT as claims and the backend derives them server-side,
+so the client never manages either. `deviceId` stays a plain header
+(`x-device-id`) — it's a per-install sync-idempotency correlation id, not
+an identity credential, so it never needed to move into the token. Every
+method builds its headers via `await auth.getValidAccessToken()` instead
+of a synchronous getter.
+
+## 4. A real bug caught before it could ship: unauthenticated background sync
+
+Wiring `AuthClient` into `main.dart` and rebuilding surfaced an unhandled
+`Bad state: Not logged in` exception at app launch, thrown from
+`SyncService`'s connectivity-triggered `syncNow()` — `main.dart` called
+`_sync.startWatchingConnectivity()` unconditionally in `initState()`,
+before `restoreSession()` even resolved, and connectivity can regain (or
+already be present) before any session exists. Fixed two ways, both
+belt-and-suspenders: `SyncService` gained `stopWatchingConnectivity()`
+and made `startWatchingConnectivity()` idempotent, and `main.dart` now
+starts/stops watching from inside its `authStateChanges` listener instead
+of unconditionally — so a sync attempt can never fire without a session
+backing it. `syncNow()` itself also gained a top-level `catch` (previously
+absent) since both its callers (the connectivity listener and the manual
+"Sync now" button) invoke it unawaited/fire-and-forget with no error
+handling of their own — any exception escaping it, including a mid-sync
+`invalid_grant`, would otherwise crash as an unhandled Future rejection.
+
+## 5. Verified end-to-end on the iOS Simulator, not just unit-level
+
+Built and ran the real app (`flutter run`, not just `flutter analyze`)
+against the booted simulator:
+
+- Login screen renders; tapping "Sign In" launches the real system
+  browser (`ASWebAuthenticationSession`/`SafariViewService` — confirmed
+  via `xcrun simctl ... log show`, not assumed) showing Keycloak's own
+  hosted login page for the `metrock` realm.
+- Signed in as `chidinma.eze@metrock.dev` / the seeded dev password —
+  real credentials against the real realm, not a mock.
+- App landed on the tab UI; Purchase Orders loaded real data using a
+  genuine Bearer token (no `x-tenant-id` header sent at all anymore).
+- **Killed procurement-service** (same "kill the backend" proof every
+  prior vertical slice has used) and captured a GRN — "Saved locally.
+  Will sync automatically once connected" — offline capture is
+  completely unaffected by any of this, exactly as designed, since Drift
+  writes never touch the network.
+- Restarted procurement-service, triggered sync, and confirmed via SQL
+  that the offline-captured GRN (`GRN-OFFLINE-e560d7bf`) actually landed
+  server-side through `/sync/push` authenticated by a real Bearer token.
+- Tapped "Sign out" — triggered Keycloak's real end-session flow (its
+  own consent screen, same as login) and returned cleanly to the login
+  screen.
+- Relaunched the app cold: `restoreSession()` found the persisted tokens
+  in secure storage and skipped straight to the tab UI with no re-login
+  needed, then correctly returned to the login screen after logout in a
+  separate run.
+
+## 6. The blocking discovery: Phase 2's exclusions had to come out immediately, not later
+
+The very first real login attempt hit `ApiException(401):
+"Missing x-tenant-id header (stub auth)"` on the Purchase Orders tab.
+This wasn't a bug in the login flow — it's the direct, entirely
+predictable consequence of `ApiClient` no longer sending `x-tenant-id`
+at all once it has a real token, hitting the Phase 2 routes that were
+deliberately left on the OLD header stub (one GET list + `/sync/push`/
+`/sync/pull` per service) because mobile didn't have a real token yet.
+The moment mobile HAS one, those routes become unreachable BY mobile,
+which meant retiring the Phase 2 exclusions wasn't the "nice-to-have
+final cleanup" it was originally scoped as — it was a hard blocker on
+finishing this section's own verification. Removed the exclusion from
+all 7 services in one pass (`consumer.apply(KeycloakAuthMiddleware)
+.forRoutes('*')`, no `.exclude()`), rebuilt, restarted, and confirmed via
+curl that the old header now fails everywhere except
+governance-service's `/authorization-check` (deliberately permanent —
+service-to-service, unrelated to mobile) before returning to finish the
+simulator verification above.
+
+## Known gaps still open after this pass (Keycloak auth retrofit, Phase 3)
+
+- **No machine-to-machine auth** — `/authorization-check` still trusts a
+  plain header from a caller assumed to be another backend service on
+  the same trusted network, unchanged since Phase 1.
+- **`roleCode`/`x-role-code` is still a dead field** — Phase 4 cleanup,
+  still not done; this is now the only piece of the Keycloak retrofit
+  left.
+- **Android redirect scheme wired but not tested** — `build.gradle.kts`'s
+  `appAuthRedirectScheme` placeholder matches the iOS URL scheme, but no
+  Android emulator run has verified the actual PKCE round-trip on that
+  platform.
+- **No biometric re-auth / app-lock** — a device left unlocked with a
+  valid stored session has standing access until the access token
+  expires and a refresh genuinely fails; out of scope for this pass.

@@ -133,35 +133,38 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 
 ## Known gaps (intentionally out of scope for now)
 
-- **Auth is real Keycloak on all 8 backend services now (Phase 2 of 4
-  done); only the Flutter mobile app is still on the header stub.** A
-  self-hosted Keycloak (`infra/docker-compose.yml`, realm config in
-  `infra/keycloak/`) issues signed JWTs carrying custom `tenant_id` and
-  `local_user_id` claims. Every service's user-facing HTTP surface now
-  runs through a real `KeycloakAuthMiddleware` instead of
-  `TenantContextMiddleware` — governance-service has its own DB-backed
-  variant (it owns the `users` table); the other 7 share one
+- **Auth is real Keycloak everywhere now (Phases 1-3 of 4 done) — the
+  Flutter mobile app included.** A self-hosted Keycloak
+  (`infra/docker-compose.yml`, realm config in `infra/keycloak/`) issues
+  signed JWTs carrying custom `tenant_id` and `local_user_id` claims.
+  Every service's HTTP surface runs through a real `KeycloakAuthMiddleware`
+  instead of `TenantContextMiddleware` — governance-service has its own
+  DB-backed variant (it owns the `users` table); the other 7 share one
   dependency-free version in `packages/backend-common` that reads
-  `local_user_id` straight off the verified token (no DB grant needed,
-  since no other service's Postgres role has access to `users`).
-  A handful of routes deliberately KEEP the old header stub in each
-  service, because the Flutter mobile app calls them directly and
-  doesn't get a real Keycloak token until Phase 3 (PKCE): each service's
-  `/sync/push` + `/sync/pull`, plus one read-only master-data list route
-  per service (`GET /purchase-orders`, `/recipes`, `/agents`,
-  `/customers`, `/vehicles`, `/employees`, `/users` — one per module,
-  confirmed against `apps/mobile/lib/core/sync/api_client.dart`'s exact
-  call list, not assumed). `accounting-service` needs no exclusions at
-  all — it has no `SyncModule` and none of its routes are mobile-called.
-  governance-service's own `/authorization-check` also keeps the stub —
-  a service-to-service endpoint (called by the other services'
-  `PostingAuthorityClient`), and real machine-to-machine auth
-  (client-credentials grant) is a separate, still out-of-scope story.
-  See `docs/RUNBOOK.md`'s "Keycloak auth retrofit" section for the full
-  verification trail, including a real regression Phase 1 shipped (it
-  broke the mobile Users tab) that got caught and fixed at the start of
-  Phase 2. Phase 3 (Flutter mobile via PKCE) and Phase 4 (docs cleanup,
-  drop the dead `roleCode`/`x-role-code` field) are still open.
+  `local_user_id` straight off the verified token. The Flutter mobile app
+  (`apps/mobile`) now signs in via real Authorization Code + PKCE
+  (`flutter_appauth`, `metrock-mobile` Keycloak client, tokens in
+  `flutter_secure_storage`) instead of hardcoded dev headers — its
+  `ApiClient` sends `Authorization: Bearer <token>` on every call, and
+  the header-stub route exclusions Phase 2 needed (one master-data list
+  route + `/sync/push`/`/sync/pull` per service) were retired once mobile
+  no longer needed them. Offline capture is unaffected — Drift writes
+  never touch the network, so login state only matters for the eventual
+  sync push/pull, never for local capture. `accounting-service` needed no
+  exclusions at any point — no `SyncModule`, no mobile-called route.
+  governance-service's `/authorization-check` is the ONE route still on
+  the old header stub, permanently — it's service-to-service (called by
+  the other services' `PostingAuthorityClient`), and real
+  machine-to-machine auth (client-credentials grant) is a separate,
+  still out-of-scope story. See `docs/RUNBOOK.md`'s "Keycloak auth
+  retrofit" sections for the full verification trail across all three
+  phases, including two real bugs caught along the way: a Phase 1
+  regression that silently broke the mobile Users tab, and a Phase 3
+  discovery that mobile literally cannot function until the Phase 2
+  exclusions are retired (not just a nice-to-have cleanup, since mobile
+  stops sending the old header the moment it has a real token). Phase 4
+  (docs cleanup, drop the dead `roleCode`/`x-role-code` field) is the
+  only piece left.
 - **Finance connector** (Zoho Books / QuickBooks): `integration_queue` rows
   are written by the ledger service but nothing consumes them yet — the
   actual outbound connector is a separate build.

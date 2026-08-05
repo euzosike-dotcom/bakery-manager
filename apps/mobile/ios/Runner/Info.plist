@@ -26,6 +26,20 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Phase 3 of the Keycloak retrofit (docs/RUNBOOK.md): flutter_appauth's
+	     redirect URI for the Authorization Code + PKCE flow. The system
+	     browser (ASWebAuthenticationSession) redirects here after login,
+	     matching infra/keycloak/realm-export.json's metrock-mobile client
+	     redirectUris entry exactly. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.metrock.metrockMobile</string>
+			</array>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

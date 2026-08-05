@@ -2,40 +2,46 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../auth/auth_client.dart';
+
 /// Talks to one backend domain service's Sync Gateway (`/sync/push`,
 /// `/sync/pull`) and its direct REST endpoints — this class is generic
 /// across services (only `baseUrl` differs); `main.dart` instantiates one
 /// per module (procurement on :3001, manufacturing on :3002) and
 /// `SyncService` (core/sync/sync_service.dart) routes each entity/event
-/// type to the right instance. Tenant/user/device identity is sent via
-/// headers today (`x-tenant-id`, `x-user-id`, `x-device-id`) — a stand-in for
-/// a real Keycloak-issued bearer token (see backend's
-/// TenantContextMiddleware doc comment for the matching stub on the server
-/// side). Swapping this for OIDC is a single-class change.
+/// type to the right instance.
+///
+/// Identity is a real Keycloak-issued Bearer token now (Phase 3 of the
+/// Keycloak retrofit, docs/RUNBOOK.md) — `tenant_id` and `local_user_id`
+/// live inside the token as claims and the backend derives them
+/// server-side, so this class never manages or sends either one
+/// directly; `AuthClient.getValidAccessToken()` is called fresh before
+/// every request (it only actually refreshes when the token is near
+/// expiry, so this isn't a network round-trip per call). `deviceId`
+/// stays a plain header — it's a per-install correlation id for offline
+/// sync idempotency, not an identity credential, so it never needed to
+/// move into the token.
 class ApiClient {
   ApiClient({
     required this.baseUrl,
-    required this.tenantId,
     required this.deviceId,
-    this.userId,
+    required this.auth,
     http.Client? httpClient,
   }) : _client = httpClient ?? http.Client();
 
   final String baseUrl;
-  final String tenantId;
   final String deviceId;
-  final String? userId;
+  final AuthClient auth;
   final http.Client _client;
 
-  Map<String, String> get _headers => {
+  Future<Map<String, String>> get _headers async => {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantId,
         'x-device-id': deviceId,
-        if (userId != null) 'x-user-id': userId!,
+        'Authorization': 'Bearer ${await auth.getValidAccessToken()}',
       };
 
   Future<List<Map<String, dynamic>>> fetchPurchaseOrders() async {
-    final res = await _client.get(Uri.parse('$baseUrl/purchase-orders'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/purchase-orders'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -45,7 +51,7 @@ class ApiClient {
   /// on the cursor-based pull path yet (see README "Known gaps"), only the
   /// transactional entities (goods receipts, production batches) are.
   Future<List<Map<String, dynamic>>> fetchRecipes() async {
-    final res = await _client.get(Uri.parse('$baseUrl/recipes'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/recipes'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -57,7 +63,7 @@ class ApiClient {
   /// regardless of what this call returned — see SalesOrderCaptureCubit's
   /// doc comment).
   Future<List<Map<String, dynamic>>> fetchAgents() async {
-    final res = await _client.get(Uri.parse('$baseUrl/agents'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/agents'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -68,7 +74,7 @@ class ApiClient {
   /// connectivity at least once before a customer can be picked (see
   /// ActivitiesLocal's doc comment).
   Future<List<Map<String, dynamic>>> fetchCustomers() async {
-    final res = await _client.get(Uri.parse('$baseUrl/customers'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/customers'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -77,7 +83,7 @@ class ApiClient {
   /// only simplification as fetchPurchaseOrders/fetchRecipes/fetchAgents/
   /// fetchCustomers — no local cache table.
   Future<List<Map<String, dynamic>>> fetchVehicles() async {
-    final res = await _client.get(Uri.parse('$baseUrl/vehicles'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/vehicles'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -86,7 +92,7 @@ class ApiClient {
   /// only simplification as every other master-data list in this app —
   /// no local cache table.
   Future<List<Map<String, dynamic>>> fetchEmployees() async {
-    final res = await _client.get(Uri.parse('$baseUrl/employees'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/employees'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -97,7 +103,7 @@ class ApiClient {
   /// corresponding capture repository or Drift table at all, not just no
   /// local cache.
   Future<List<Map<String, dynamic>>> fetchUsers() async {
-    final res = await _client.get(Uri.parse('$baseUrl/users'), headers: _headers);
+    final res = await _client.get(Uri.parse('$baseUrl/users'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
@@ -108,7 +114,7 @@ class ApiClient {
   Future<List<Map<String, dynamic>>> syncPush(List<Map<String, dynamic>> events) async {
     final res = await _client.post(
       Uri.parse('$baseUrl/sync/push'),
-      headers: _headers,
+      headers: await _headers,
       body: jsonEncode({'events': events}),
     );
     _throwIfNotOk(res);
@@ -126,7 +132,7 @@ class ApiClient {
       'since': since,
       'limit': '$limit',
     });
-    final res = await _client.get(uri, headers: _headers);
+    final res = await _client.get(uri, headers: await _headers);
     _throwIfNotOk(res);
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     return PullPage(

@@ -23,6 +23,15 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // flutter_appauth's PKCE redirect (Phase 3 of the Keycloak retrofit,
+        // docs/RUNBOOK.md) — must match the iOS URL scheme in
+        // ios/Runner/Info.plist and infra/keycloak/realm-export.json's
+        // metrock-mobile client redirectUris exactly. Not tested on an
+        // Android emulator this pass (this project's established testing
+        // surface is the iOS Simulator — see every prior RUNBOOK vertical
+        // slice), but wired for correctness/completeness.
+        manifestPlaceholders["appAuthRedirectScheme"] = "com.metrock.metrockMobile"
     }
 
     buildTypes {

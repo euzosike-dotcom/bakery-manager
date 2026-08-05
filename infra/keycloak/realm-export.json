@@ -71,6 +71,24 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "metrock-mobile",
+      "name": "Metrock mobile app (Phase 3 - real PKCE client)",
+      "description": "The real mobile client, Authorization Code + PKCE via system browser. Never Direct Access Grants.",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["com.metrock.metrockMobile:/oauth2redirect"],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "optionalClientScopes": ["offline_access"]
     }
   ],
   "components": {
