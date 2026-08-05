@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { KafkaProducerService } from '@metrock/backend-common';
+import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { RecordBillPaymentDto } from './dto/bill-payment.dto';
 
@@ -36,6 +36,7 @@ export class BillsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kafka: KafkaProducerService,
+    private readonly postingAuthority: PostingAuthorityClient,
   ) {}
 
   async handleGrnPosted(event: GrnPostedEvent): Promise<void> {
@@ -125,7 +126,15 @@ export class BillsService {
     return bill;
   }
 
-  async recordPayment(tenantId: string, billId: string, dto: RecordBillPaymentDto) {
+  async recordPayment(tenantId: string, billId: string, dto: RecordBillPaymentDto, userId: string | undefined) {
+    await this.postingAuthority.checkAuthority({
+      tenantId,
+      userId,
+      requiredPermission: 'can_post',
+      moduleName: 'ACCOUNTING',
+      recordIdRef: billId,
+    });
+
     const paymentId = randomUUID();
 
     const bill = await this.prisma.forTenant(tenantId, async (tx) => {

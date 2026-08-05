@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { KafkaProducerService } from '@metrock/backend-common';
+import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { CalculatePayrollRunDto } from './dto/payroll.dto';
 
@@ -31,6 +31,7 @@ export class PayrollService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kafka: KafkaProducerService,
+    private readonly postingAuthority: PostingAuthorityClient,
   ) {}
 
   async calculateRun(tenantId: string, dto: CalculatePayrollRunDto) {
@@ -119,7 +120,15 @@ export class PayrollService {
     );
   }
 
-  async postRun(tenantId: string, payrollRunId: string) {
+  async postRun(tenantId: string, payrollRunId: string, userId: string | undefined) {
+    await this.postingAuthority.checkAuthority({
+      tenantId,
+      userId,
+      requiredPermission: 'can_post',
+      moduleName: 'HR',
+      recordIdRef: payrollRunId,
+    });
+
     const runResult = await this.prisma.forTenant(tenantId, async (tx) => {
       const run = await tx.payrollRun.findUnique({
         where: { tenantId_payrollRunId: { tenantId, payrollRunId } },

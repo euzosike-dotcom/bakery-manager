@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { KafkaProducerService } from '@metrock/backend-common';
+import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { CompleteMaintenanceRequestDto } from './dto/maintenance.dto';
 
@@ -19,6 +19,7 @@ export class MaintenanceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kafka: KafkaProducerService,
+    private readonly postingAuthority: PostingAuthorityClient,
   ) {}
 
   findAll(tenantId: string) {
@@ -27,7 +28,20 @@ export class MaintenanceService {
     );
   }
 
-  async completeMaintenanceRequest(tenantId: string, maintenanceRequestId: string, dto: CompleteMaintenanceRequestDto) {
+  async completeMaintenanceRequest(
+    tenantId: string,
+    maintenanceRequestId: string,
+    dto: CompleteMaintenanceRequestDto,
+    userId: string | undefined,
+  ) {
+    await this.postingAuthority.checkAuthority({
+      tenantId,
+      userId,
+      requiredPermission: 'can_post',
+      moduleName: 'FLEET',
+      recordIdRef: maintenanceRequestId,
+    });
+
     const totalCost = dto.partsCost + dto.labourCost;
 
     await this.prisma.forTenant(tenantId, async (tx) => {

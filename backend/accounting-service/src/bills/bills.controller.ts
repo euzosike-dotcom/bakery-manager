@@ -23,6 +23,6 @@ export class BillsController {
     @Param('billId') billId: string,
     @Body() dto: RecordBillPaymentDto,
   ) {
-    return this.bills.recordPayment(tenant.tenantId, billId, dto);
+    return this.bills.recordPayment(tenant.tenantId, billId, dto, tenant.userId);
   }
 }

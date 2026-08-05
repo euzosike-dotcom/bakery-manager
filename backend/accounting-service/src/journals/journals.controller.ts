@@ -9,6 +9,6 @@ export class JournalsController {
 
   @Post()
   create(@CurrentTenant() tenant: TenantContext, @Body() dto: CreateJournalEntryDto) {
-    return this.journals.createManualJournalEntry(tenant.tenantId, dto);
+    return this.journals.createManualJournalEntry(tenant.tenantId, dto, tenant.userId);
   }
 }

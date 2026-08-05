@@ -24,6 +24,6 @@ export class PayrollController {
   // mirrors NcrService.verifyNcr's separation of submit vs. verify.
   @Post(':payrollRunId/post')
   postRun(@CurrentTenant() tenant: TenantContext, @Param('payrollRunId') payrollRunId: string) {
-    return this.payroll.postRun(tenant.tenantId, payrollRunId);
+    return this.payroll.postRun(tenant.tenantId, payrollRunId, tenant.userId);
   }
 }

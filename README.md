@@ -233,13 +233,23 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `journal_lines.cost_center_plant_id` (still NULL for every sales-
   revenue posting in this platform), so HR's payroll calculation reads
   sales-service's table directly instead of deriving revenue from the GL.
-- **Posting-authority enforcement isn't retrofitted into the other seven
-  domain services** — `governance-service`'s `AuthorizationService`
-  correctly authorizes/denies/audits/alerts given a user and a required
-  permission, but no other service's posting endpoint (GRN, batch close,
-  sales order, bill/invoice payment, fuel/maintenance, payroll run) calls
-  it before posting yet. The mechanism is proven; wiring it into every
-  place the SDD says it should gate is real, out-of-scope work.
+- **Posting-authority enforcement is retrofitted into the six ONLINE-ONLY
+  finalization endpoints, deliberately not into offline field capture** —
+  NCR verify (sales-service), vendor-bill payment + customer-invoice
+  payment + manual journal entry (accounting-service), maintenance-request
+  completion (fleet-service), and payroll-run posting (hr-service) all now
+  call `governance-service`'s `POST /authorization-check` via
+  `@metrock/backend-common`'s `PostingAuthorityClient` before posting.
+  GRN receipt, batch close, sales order creation, and fuel/trip/attendance
+  capture are NOT gated — those are offline-capturable actions performed
+  by operational staff (a stores clerk, a production operator, a sales
+  agent) who legitimately hold no `can_post` authority; gating them would
+  require a synchronous online call mid-offline-capture, contradicting
+  the offline-first design and breaking the already-verified capture flows
+  tested against exactly that seed data. See `docs/RUNBOOK.md`'s "Posting-
+  authority retrofit" section for the full verification trail (all six
+  endpoints, three scenarios each, plus a fail-closed check with
+  governance-service killed).
 - **`approval_matrix` thresholds are configured but not enforced** — real,
   seeded, queryable data, but no service routes a transaction through
   approval-level checks based on it.
@@ -266,3 +276,11 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `file:` deps symlink by default, which breaks `instanceof` checks across
   module instances at runtime — fixed with `install-links=true` in each
   consumer's `.npmrc`).
+- ~~Posting-authority enforcement isn't retrofitted into the other
+  services~~ **Resolved 2026-08-04**: `PostingAuthorityClient` (in
+  `packages/backend-common`, the platform's first synchronous
+  service-to-service call) now gates the six online-only posting
+  endpoints. See the "Known gaps" bullet above for what's gated and why
+  the offline-capturable endpoints deliberately aren't, and
+  `docs/RUNBOOK.md`'s "Posting-authority retrofit" section for the
+  verification trail.

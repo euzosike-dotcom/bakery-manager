@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { KafkaProducerService } from '@metrock/backend-common';
+import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { SubmitNcrDto } from './dto/ncr.dto';
 import { SyncPushResultDto } from '../sales/dto/sales-order.dto';
@@ -34,6 +34,7 @@ export class NcrService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kafka: KafkaProducerService,
+    private readonly postingAuthority: PostingAuthorityClient,
   ) {}
 
   async submitNcr(tenantId: string, dto: SubmitNcrDto, options: SubmitNcrOptions): Promise<SyncPushResultDto> {
@@ -69,6 +70,14 @@ export class NcrService {
 
   /** Online-only. Not part of the offline sync surface — see class doc comment. */
   async verifyNcr(tenantId: string, ncrId: string, verifiedByUserId: string | undefined) {
+    await this.postingAuthority.checkAuthority({
+      tenantId,
+      userId: verifiedByUserId,
+      requiredPermission: 'can_post',
+      moduleName: 'SALES',
+      recordIdRef: ncrId,
+    });
+
     // Kafka publish happens AFTER this transaction commits, not inside it —
     // same reasoning as ProcurementService.createGoodsReceipt and
     // ProductionService.closeProductionBatch: a slow/unavailable broker

@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { TenantContextMiddleware } from '@metrock/backend-common';
 import { PrismaModule } from './common/prisma.module';
 import { KafkaModule } from './common/kafka.module';
+import { GovernanceModule } from './common/governance.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
 import { TripsModule } from './trips/trips.module';
 import { FuelModule } from './fuel/fuel.module';
@@ -14,6 +15,7 @@ import { SyncModule } from './sync/sync.module';
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     KafkaModule,
+    GovernanceModule,
     VehiclesModule,
     TripsModule,
     FuelModule,

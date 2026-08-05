@@ -20,6 +20,6 @@ export class MaintenanceController {
     @Param('maintenanceRequestId') maintenanceRequestId: string,
     @Body() dto: CompleteMaintenanceRequestDto,
   ) {
-    return this.maintenance.completeMaintenanceRequest(tenant.tenantId, maintenanceRequestId, dto);
+    return this.maintenance.completeMaintenanceRequest(tenant.tenantId, maintenanceRequestId, dto, tenant.userId);
   }
 }

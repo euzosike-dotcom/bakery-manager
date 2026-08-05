@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { CheckPostingAuthorityDto } from './dto/authorization.dto';
@@ -17,18 +17,30 @@ const PERMISSION_FIELD = {
  * authorization bypass attempt is a security event whether or not it
  * succeeds."
  *
- * This is the one place in the whole platform that check is actually
- * implemented and enforced — the other seven domain services' posting
- * endpoints (GRN, batch close, sales order, bill/invoice payment, fuel/
- * maintenance, payroll run) do NOT call this before posting; retrofitting
- * it into all of them is real, honest, out-of-scope work (see README
- * "Known gaps"), not something this slice quietly assumes is already
- * true elsewhere. What's proven here is the mechanism itself: given a
- * user and a required permission, it correctly authorizes a role that
- * has it, and — the part the SDD specifically calls out — correctly
- * DENIES, AUDITS (with `override_flag = true` and a reason_code, never
- * silently), and ALERTS on a role that doesn't, rather than either
- * silently allowing or silently rejecting.
+ * This is the one place in the whole platform this check is actually
+ * implemented — every other service calls out to it over HTTP (via
+ * `@metrock/backend-common`'s `PostingAuthorityClient`, the platform's
+ * first synchronous service-to-service call; everything else is either a
+ * DB read or an async Kafka event) rather than duplicating the logic.
+ * It's wired into the six ONLINE-ONLY finalization/posting endpoints
+ * (NCR verify, vendor-bill payment, customer-invoice payment, manual
+ * journal entry, maintenance-request completion, payroll-run posting) —
+ * deliberately NOT into the offline-capturable field-capture endpoints
+ * (GRN receipt, batch close, sales order creation, fuel/trip/attendance
+ * capture): those are performed by operational staff (a stores clerk, a
+ * production operator, a sales agent) who legitimately hold no
+ * `can_post` authority, and gating them would both require a
+ * synchronous online call mid-offline-capture (contradicting the
+ * offline-first design) and break the already-verified capture flows
+ * tested against exactly that seed data. See README "Known gaps" for the
+ * full reasoning.
+ *
+ * Given a user and a required permission, this correctly authorizes a
+ * role that has it, and — the part the SDD specifically calls out —
+ * correctly DENIES, AUDITS (with `override_flag = true` and a
+ * reason_code, never silently), and ALERTS on a role that doesn't, or on
+ * no identity at all, rather than either silently allowing or silently
+ * rejecting.
  *
  * "Raise a real-time alert" has no real alerting pipeline behind it in
  * this platform (no email/Slack/pager integration exists anywhere) — the
@@ -48,13 +60,20 @@ export class AuthorizationService {
   ) {}
 
   async checkAuthority(tenantId: string, dto: CheckPostingAuthorityDto) {
-    const user = await this.prisma.forTenant(tenantId, (tx) =>
-      tx.user.findUnique({ where: { tenantId_userId: { tenantId, userId: dto.userId } }, include: { role: true } }),
-    );
-    if (!user) throw new NotFoundException(`User ${dto.userId} not found`);
+    // No userId at all (missing x-user-id upstream) is treated exactly
+    // like an unknown userId — both resolve to "no authority", never a
+    // validation error. This is deliberately the SAME code path as a
+    // real denial below: an anonymous caller IS the bypass-attempt
+    // scenario SDD §4.2 describes, not a separate case to special-case
+    // around.
+    const user = dto.userId
+      ? await this.prisma.forTenant(tenantId, (tx) =>
+          tx.user.findUnique({ where: { tenantId_userId: { tenantId, userId: dto.userId! } }, include: { role: true } }),
+        )
+      : null;
 
     const permissionField = PERMISSION_FIELD[dto.requiredPermission];
-    const authorized = user.role ? Boolean(user.role[permissionField]) : false;
+    const authorized = user?.role ? Boolean(user.role[permissionField]) : false;
 
     if (authorized) {
       await this.audit.recordEntry(tenantId, {
@@ -65,7 +84,7 @@ export class AuthorizationService {
         newValueSnapshot: { requiredPermission: dto.requiredPermission, result: 'AUTHORIZED' },
         overrideFlag: false,
       });
-      return { authorized: true, roleCode: user.role?.roleCode };
+      return { authorized: true, roleCode: user?.role?.roleCode };
     }
 
     await this.audit.recordEntry(tenantId, {
@@ -75,7 +94,7 @@ export class AuthorizationService {
       actionType: 'POSTING_AUTHORITY_DENIED',
       newValueSnapshot: {
         requiredPermission: dto.requiredPermission,
-        roleCode: user.role?.roleCode ?? null,
+        roleCode: user?.role?.roleCode ?? null,
         result: 'DENIED',
       },
       overrideFlag: true,
@@ -84,12 +103,12 @@ export class AuthorizationService {
 
     // Stand-in for a real alerting pipeline — see class doc comment.
     this.logger.error(
-      `ALERT: user=${dto.userId} role=${user.role?.roleCode ?? 'NONE'} attempted ${dto.requiredPermission} ` +
+      `ALERT: user=${dto.userId ?? 'UNKNOWN'} role=${user?.role?.roleCode ?? 'NONE'} attempted ${dto.requiredPermission} ` +
         `on ${dto.moduleName}/${dto.recordIdRef} without authority — audited with override_flag=true`,
     );
 
     throw new ForbiddenException(
-      `User ${dto.userId} (role ${user.role?.roleCode ?? 'none'}) lacks ${dto.requiredPermission} authority for ${dto.moduleName}`,
+      `User ${dto.userId ?? 'UNKNOWN'} (role ${user?.role?.roleCode ?? 'none'}) lacks ${dto.requiredPermission} authority for ${dto.moduleName}`,
     );
   }
 }

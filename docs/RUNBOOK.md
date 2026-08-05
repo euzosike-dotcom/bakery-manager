@@ -1590,13 +1590,12 @@ this module, so nothing was built to push or pull.
 
 ## Known gaps still open after this pass (Governance)
 
-- **Posting-authority enforcement isn't retrofitted into the other seven
-  domain services** — GRN, batch close, sales order, bill/invoice
-  payment, fuel/maintenance, and payroll-run posting endpoints do NOT
-  call `AuthorizationService.checkAuthority` before posting. What's
-  proven is the mechanism itself (it correctly authorizes/denies/audits/
-  alerts), not that it's wired into every place the SDD says it should
-  gate. Real, honest, out-of-scope work for a future pass.
+- ~~Posting-authority enforcement isn't retrofitted into the other seven
+  domain services~~ **Resolved 2026-08-04** — see "Posting-authority
+  retrofit" section below for the six online-only endpoints now gated
+  and the full verification trail. GRN, batch close, sales order
+  creation, and fuel/trip/attendance capture remain deliberately
+  ungated (offline field capture, not finalization/posting).
 - **`approval_matrix` thresholds are configured but not enforced** —
   seeded, queryable, real data, but no service actually routes a
   transaction through approval-level checks based on it yet.
@@ -1610,3 +1609,132 @@ this module, so nothing was built to push or pull.
   requirement (SDD §4.2) is a structured log line, not an actual
   email/Slack/pager integration. Swapping it for one is a single-method
   change in `AuthorizationService`.
+
+# Posting-authority retrofit
+
+`governance-service`'s `AuthorizationService.checkAuthority` (Slice #8)
+was proven in isolation but not called from anywhere else. This pass wires
+it into the six ONLINE-ONLY finalization/posting endpoints — NCR verify
+(sales-service), vendor-bill payment + customer-invoice payment + manual
+journal entry (accounting-service), maintenance-request completion
+(fleet-service), and payroll-run posting (hr-service) — deliberately NOT
+into GRN receipt, batch close, sales order creation, or fuel/trip/
+attendance capture, which are offline-capturable field actions performed
+by operational staff who legitimately hold no `can_post` authority.
+Gating those would require a synchronous online call mid-offline-capture,
+contradicting the offline-first design and breaking the already-verified
+capture flows tested against the same `STORES_CLERK` seed user.
+
+## 1. Shared client: `PostingAuthorityClient` (`packages/backend-common`)
+
+The platform's first synchronous service-to-service call — every prior
+cross-service interaction was either a direct read-only DB query or an
+async Kafka event, but an authorization decision has to be made and
+audited before the caller's own posting transaction proceeds; there's no
+sensible way to make that eventually-consistent. Built on Node 20's global
+`fetch`, no new dependency. `checkAuthority(...)` either returns (caller
+may proceed) or throws — a 403 from governance-service becomes a
+`ForbiddenException`, and an unreachable governance-service becomes a
+`ServiceUnavailableException` — fail-**closed** either way, never a
+silent proceed.
+
+Wired into each of the four consuming services the same way `KafkaModule`
+already was: a `@Global()` `GovernanceModule` in `src/common/`, a
+`GOVERNANCE_BASE_URL` env var (default `http://localhost:3008`), imported
+once in `app.module.ts`.
+
+`governance-service`'s `CheckPostingAuthorityDto.userId` was hardened to
+`@IsOptional()` — a caller with no identity at all (no `x-user-id`
+header) must resolve to a real denial, not a validation error, since "no
+identity" is itself the bypass-attempt scenario SDD §4.2 describes.
+`AuthorizationService.checkAuthority` treats a missing/unknown userId
+exactly like a real denial: DENIED, audited (`user_id` NULL,
+`override_flag = true`, `reason_code = 'UNAUTHORIZED_POSTING_ATTEMPT'`),
+and alerted.
+
+**Local `file:` dependency gotcha, again** — after rebuilding
+`backend-common`, `npm install` in a consuming service did NOT pick up
+the new `posting-authority.client.js` file (stale `install-links=true`
+copy from before the file existed). Fixed by removing
+`node_modules/@metrock/backend-common` and re-running `npm install` in
+each of the four services — a fresh copy, not an incremental one, is
+required when a *new file* (not just changed content in an existing one)
+is added to a local `file:` dependency.
+
+## 2. Prove the backend chain — all via curl, all six endpoints
+
+Seed data: `STORES_CLERK` (Amaka Obi, `can_post=false`) and
+`PROCUREMENT_MGR` (Chidinma Eze, `can_post=true`), same two users every
+prior slice's capital/authority gate tests have used. Three scenarios per
+endpoint — denied, missing `x-user-id`, authorized — run in that order
+specifically *because* `checkAuthority` runs before each service's own
+posting transaction, so a denied/missing attempt never mutates the
+underlying record and it stays available for the next scenario.
+
+```
+# NCR verify (sales-service :3003)
+POST /ncr-collections/:ncrId/verify
+  clerk  -> 403 "lacks can_post authority for SALES"
+  none   -> 403 "User UNKNOWN (role none) lacks can_post authority for SALES"
+  mgr    -> 201 {"ncrId":"...","verified":true}
+
+# Vendor-bill payment (accounting-service :3004)
+POST /vendor-bills/:billId/payments
+  clerk -> 403 / none -> 403 / mgr -> 201 (bill PARTIALLY_PAID)
+
+# Customer-invoice payment (accounting-service :3004)
+POST /customer-invoices/:invoiceId/payments
+  clerk -> 403 / none -> 403 / mgr -> 201 (invoice PARTIALLY_PAID)
+
+# Manual journal entry (accounting-service :3004)
+POST /journal-entries
+  clerk -> 403 / none -> 403 / mgr -> 201 (balanced entry POSTED)
+
+# Maintenance-request completion (fleet-service :3006)
+POST /maintenance-requests/:id/complete
+  clerk -> 403 / none -> 403 / mgr -> 201 {"completed":true,...}
+
+# Payroll-run posting (hr-service :3007)
+POST /payroll-runs/:id/post
+  clerk -> 403 / none -> 403 / mgr -> 201 {"posted":true,...}
+```
+
+All 18 calls (6 endpoints × 3 scenarios) matched expectations exactly.
+
+**Audit trail checked directly, not just inferred from the HTTP response**
+— `SELECT ... FROM audit_log WHERE action_type IN
+('POSTING_AUTHORITY_DENIED','AUTHORIZATION_CHECK')` for this run's rows
+confirmed: every denial has `override_flag = true` and `reason_code =
+'UNAUTHORIZED_POSTING_ATTEMPT'`; the missing-userId denials have `user_id
+IS NULL` specifically (not the string `"UNKNOWN"` — that's only in the
+log line and exception message); every authorized check has
+`override_flag = false` and no `reason_code`. `GET /audit-log/verify`
+afterward: `{"valid": true, "totalRecords": 23}` — the hash chain absorbed
+all of today's rows without breaking.
+
+**Proved fail-closed for real, not just by reading the code** — killed
+governance-service, then attempted an authorized (`can_post=true`)
+vendor-bill payment against a still-OPEN bill: `503 "Posting-authority
+check unavailable — governance-service unreachable"`. Confirmed via SQL
+that the bill's `amount_paid`/`bill_status` were untouched — an
+authorized user got blocked anyway, and no partial state was left behind,
+because the check runs and throws before the domain transaction ever
+opens. Restarted governance-service and the same request then succeeded
+normally.
+
+## Known gaps still open after this pass (Posting-authority retrofit)
+
+- **GRN receipt, batch close, sales order creation, and fuel/trip/
+  attendance capture remain ungated** — by design, not an oversight; see
+  this section's intro and the README "Known gaps" entry for the
+  offline-first reasoning.
+- **No circuit breaker, retry, or explicit timeout** on
+  `PostingAuthorityClient`'s `fetch` call — a slow (not just down)
+  governance-service will make every gated endpoint slow with it.
+  Acceptable for six endpoints in one dev environment; a production
+  deployment would want this hardened, or handled by a real API Gateway
+  instead of direct service-to-service calls.
+- **`approval_matrix` thresholds still aren't enforced** — this retrofit
+  only wires the binary `can_post`/`can_approve`/`can_override` check;
+  amount-based approval routing is unrelated, still-open work (unchanged
+  from the Governance slice's own "Known gaps").

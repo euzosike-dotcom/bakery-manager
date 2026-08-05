@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { CreateJournalEntryDto } from './dto/journal-entry.dto';
 
@@ -19,9 +20,12 @@ import { CreateJournalEntryDto } from './dto/journal-entry.dto';
  */
 @Injectable()
 export class JournalsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly postingAuthority: PostingAuthorityClient,
+  ) {}
 
-  async createManualJournalEntry(tenantId: string, dto: CreateJournalEntryDto) {
+  async createManualJournalEntry(tenantId: string, dto: CreateJournalEntryDto, userId: string | undefined) {
     for (const line of dto.lines) {
       const isDebit = line.debitAmount > 0 && line.creditAmount === 0;
       const isCredit = line.creditAmount > 0 && line.debitAmount === 0;
@@ -41,6 +45,14 @@ export class JournalsService {
     }
 
     const journalEntryId = randomUUID();
+
+    await this.postingAuthority.checkAuthority({
+      tenantId,
+      userId,
+      requiredPermission: 'can_post',
+      moduleName: 'ACCOUNTING',
+      recordIdRef: journalEntryId,
+    });
 
     return this.prisma.forTenant(tenantId, async (tx) => {
       const entry = await tx.journalEntry.create({
