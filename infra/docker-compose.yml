@@ -64,3 +64,22 @@ services:
       - "9001:9001"
     volumes:
       - ./.miniodata:/data
+
+  # Replaces TenantContextMiddleware's stub-header auth (SDD §1.2) —
+  # started as dev-mode (start-dev), admin/admin credentials, NOT
+  # production config. --import-realm loads realm-export.json on every
+  # boot; re-importing an already-existing realm is a Keycloak no-op, so
+  # this is safe to restart repeatedly. See infra/keycloak/seed-users.sh
+  # for the companion script that creates a Keycloak user per existing
+  # Postgres `users` row.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json

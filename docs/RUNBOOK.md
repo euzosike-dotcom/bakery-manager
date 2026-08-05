@@ -1738,3 +1738,192 @@ normally.
   only wires the binary `can_post`/`can_approve`/`can_override` check;
   amount-based approval routing is unrelated, still-open work (unchanged
   from the Governance slice's own "Known gaps").
+
+# Keycloak auth retrofit — Phase 1 (governance-service pilot)
+
+`TenantContextMiddleware`'s stub (`x-tenant-id`/`x-user-id`/`x-role-code`
+headers, trusted with zero verification) has been the platform's auth
+story since Slice #1. This phase replaces it with real Keycloak-issued,
+JWKS-verified JWTs — but ONLY for governance-service, proving the pattern
+before repeating it six more times. Scoped in four phases (agreed before
+starting): **Phase 1** = infra + governance-service pilot (this section).
+**Phase 2** = mechanical swap into the other 7 services. **Phase 3** =
+Flutter mobile via Authorization Code + PKCE. **Phase 4** = docs cleanup +
+drop the now-dead `roleCode`/`x-role-code` field (confirmed by grep before
+starting: no authorization logic anywhere reads it — `AuthorizationService`
+always re-resolves role by a DB join from `userId`).
+
+## 1. Infra: self-hosted Keycloak + realm config
+
+`infra/docker-compose.yml` gains a `keycloak` service
+(`quay.io/keycloak/keycloak:26.0`, `start-dev --import-realm`, admin/admin
+— dev-only). `infra/keycloak/realm-export.json` defines:
+
+- Realm `metrock`, a custom `tenant` client scope (default on every
+  client) mapping the `tenant_id` user attribute onto issued tokens.
+- `metrock-test-client`: public, Direct Access Grants only — for
+  curl-minted dev/test tokens. Explicitly NOT the real mobile client;
+  Phase 3's client uses PKCE instead.
+- `components.org.keycloak.userprofile.UserProfileProvider` with
+  `unmanagedAttributePolicy: ENABLED`.
+
+**Two real Keycloak gotchas hit and fixed while building this, both
+invisible until a token was actually minted and decoded — the admin API
+returned 201/204 success in every case, no error surfaced either time:**
+
+1. **Declarative User Profile silently drops undeclared attributes.**
+   Keycloak 24+ realms only persist user attributes declared in the
+   realm's User Profile schema (`username`/`email`/`firstName`/
+   `lastName` by default) — `attributes: {"tenant_id": [...]}` in a
+   create-user call returns `201 Created` and is silently discarded.
+   Fixed by setting `unmanagedAttributePolicy: ENABLED` on the realm's
+   User Profile config. Found by minting a token and decoding it: no
+   `tenant_id` claim, despite the mapper being configured correctly and
+   the create call having "succeeded."
+2. **A raw realm-JSON import doesn't create Keycloak's own built-in
+   client scopes** (`profile`/`email`/`roles`/`basic` — normally created
+   by the "New realm" wizard, not by a partial JSON import). One
+   consequence: the ACCESS token lacked `sub` even though the ID token
+   had it (ID token generation sets `sub` unconditionally; the access
+   token's `sub` normally comes via the built-in `basic` scope's mapper,
+   which didn't exist here). Fixed with an explicit
+   `oidc-usermodel-property-mapper` (`user.attribute: "id"` →
+   `claim.name: "sub"`) added to our own custom `tenant` scope, rather
+   than trying to hand-reconstruct all of Keycloak's built-in scopes.
+
+Also hit and fixed: `KEYCLOAK_ADMIN`/`KEYCLOAK_ADMIN_PASSWORD` are
+deprecated in Keycloak 26 in favor of `KC_BOOTSTRAP_ADMIN_USERNAME`/
+`KC_BOOTSTRAP_ADMIN_PASSWORD` — cosmetic (old names still worked, just
+logged a warning) but fixed for a clean boot log.
+
+**Proof the realm file is genuinely self-sufficient, not just "worked
+after live patching":** after fixing both issues via the Admin REST API
+directly against a running container (to confirm the fix before
+committing to it), the container was fully torn down and recreated from
+a `realm-export.json` with both fixes baked in — a clean `docker compose
+up` reproduced a fully working realm, with no manual API calls, before
+`seed-users.sh` ran even once.
+
+## 2. `infra/keycloak/seed-users.sh`
+
+Creates one Keycloak user per existing Postgres `users` row (matched by
+email, idempotent — safe to re-run), sets the `tenant_id` attribute and a
+dev password, and writes the resulting Keycloak user id back into
+`users.keycloak_subject_id` — the column the schema has carried unused
+since migration `003_governance.sql`. Run against the two existing
+Slice #1/#4 seed users (`amaka.obi@metrock.dev` / `STORES_CLERK` /
+`can_post=false`, `chidinma.eze@metrock.dev` / `PROCUREMENT_MGR` /
+`can_post=true`) — same two users every prior slice's capital/authority
+gate tests have used, now with real Keycloak identities layered on top
+of the same local role data.
+
+## 3. `packages/backend-common`'s `verifyKeycloakToken`
+
+Built on `jsonwebtoken` + `jwks-rsa`, deliberately NOT `jose` — every
+backend service in this monorepo compiles to CommonJS
+(`tsconfig.json`'s `"module": "commonjs"`), and `jose`'s ESM-only
+packaging in recent major versions would break under a plain `require()`.
+Verifies the token's RS256 signature against the realm's JWKS endpoint
+(cached by `jwks-rsa`, not fetched per-request), checks `iss`, and
+extracts `tenant_id` + `sub` — throwing `UnauthorizedException` on any
+failure (malformed token, bad signature, wrong issuer, expired, missing
+claims). Rebuilding this package after adding new dependencies surfaced
+the `install-links=true` gotcha again, one level deeper than before: a
+plain `npm install` in a consuming service did NOT pick up
+`backend-common`'s own new dependencies (`jsonwebtoken`/`jwks-rsa`), only
+its new source files. Fixed by deleting the consuming service's
+`node_modules` AND `package-lock.json` (not just
+`node_modules/@metrock/backend-common` — that alone wasn't enough this
+time) and reinstalling from scratch, then re-running `prisma generate`
+(wiped along with the rest of `node_modules`).
+
+## 4. `KeycloakAuthMiddleware` (governance-service only)
+
+`backend/governance-service/src/common/keycloak-auth.middleware.ts`
+verifies the Bearer token, then resolves the JWT's `sub` to this
+tenant's LOCAL `users.user_id` via `keycloak_subject_id` (a
+tenant-scoped `forTenant` lookup — the same pattern
+`AuthorizationService.checkAuthority` already used). Populates the same
+`TenantContext` shape `@CurrentTenant()` always returned, so every
+existing controller needed zero changes. A verified token with no
+matching local user row does NOT get rejected — `tenantId` is already
+trustworthy from the signed claim, and `userId` resolving to `undefined`
+is exactly the "no identity" case `checkAuthority` already treats as an
+automatic, audited denial wherever a posting-authority check actually
+gates on it.
+
+**Real regression caught before it shipped**: applying this middleware to
+`forRoutes('*')` would have broken the already-completed posting-authority
+retrofit — `/authorization-check` is called by the OTHER six services'
+`PostingAuthorityClient` with a plain `x-tenant-id` header (service-to-
+service, no user Bearer token involved), and requiring Keycloak auth on
+that route returned a 401 the instant it was tested end-to-end through
+sales-service's real NCR-verify call. Fixed with
+`consumer.apply(TenantContextMiddleware).forRoutes('authorization-check')`
++ `consumer.apply(KeycloakAuthMiddleware).exclude('authorization-check')`
+— `/authorization-check` deliberately keeps the header stub (a separate,
+out-of-scope machine-to-machine auth story), every other route on this
+service gets the real thing.
+
+## 5. Verification — all via curl, real Keycloak-issued tokens
+
+```
+# Real token, real Bearer auth — tenant-scoped read succeeds
+GET /users  Authorization: Bearer <Amaka's real token>
+  -> 200, returns this tenant's 2 users
+
+# No token at all
+GET /users
+  -> 401 "Missing Authorization: Bearer <token>"
+
+# Tampered signature (last char of the token flipped)
+GET /users  Authorization: Bearer <tampered>
+  -> 401 "Invalid bearer token: invalid signature"
+
+# Expired token (client's access-token lifespan set to 2s for this test,
+# reset to default immediately after)
+GET /users  Authorization: Bearer <expired>
+  -> 401 "Invalid bearer token: jwt expired"
+
+# Spoofed x-tenant-id header ALONGSIDE a valid real Bearer token — the
+# header is now completely inert; the JWT's own tenant_id claim wins
+GET /users  Authorization: Bearer <valid>  x-tenant-id: 00000000-...
+  -> 200, still returns the TOKEN's real tenant's data, not the spoofed one
+
+# Old-style header-only auth (no Bearer at all) — now dead on every
+# route except the one deliberately excluded
+GET /users  x-tenant-id: <real tenant>
+  -> 401 (correctly rejected — the exclusion is scoped to
+     /authorization-check only, not a blanket reopening)
+```
+
+Then the full `/authorization-check` three-scenario matrix (denied /
+missing-userId / authorized) was re-run with the CALLING request itself
+authenticated by a real Bearer token instead of the old headers, followed
+by a real end-to-end proof through the actual cross-service path — not
+just a simulated curl — by submitting a fresh NCR via sales-service and
+verifying it, exercising the full sales-service → `PostingAuthorityClient`
+→ governance-service chain post-fix. `GET /audit-log/verify` afterward:
+`{"valid": true, "totalRecords": 29}` — hash chain intact through the
+entire session's testing.
+
+## Known gaps still open after this pass (Keycloak auth retrofit, Phase 1)
+
+- **7 of 8 backend services still use the header stub** — Phase 2,
+  tracked, not started.
+- **No Flutter mobile integration yet** — Phase 3. The mobile app still
+  sends plain `x-tenant-id`/`x-user-id`/`x-device-id` headers
+  (`apps/mobile/lib/core/sync/api_client.dart`).
+- **No machine-to-machine auth for service-to-service calls** —
+  `/authorization-check` (and any future internal-only endpoint) still
+  trusts a plain header from a caller assumed to be another backend
+  service on the same trusted network. A real deployment would want a
+  client-credentials grant (one Keycloak client per calling service)
+  instead of trusting an unauthenticated header, even internally.
+- **No self-service signup, password reset, or MFA rollout** —
+  provisioning stays `seed-users.sh`-driven, matching every other
+  master-data table in this platform. `users.mfa_enabled` still exists
+  but nothing reads it.
+- **Dev password (`DevPassw0rd!`) is shared across all seeded users and
+  committed in a script default** — fine for a local dev realm nobody
+  else can reach, would need to change for anything shared.

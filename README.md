@@ -133,10 +133,22 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 
 ## Known gaps (intentionally out of scope for now)
 
-- **Auth**: Keycloak is specified in the SDD but not wired yet. A stub
-  `x-tenant-id` / `x-user-role` header middleware stands in for real OIDC
-  tokens. Replacing the stub with real Keycloak JWT validation is the next
-  hardening step before this touches production data.
+- **Auth is real Keycloak on governance-service only (Phase 1 of 4); the
+  other 7 services are still on the header stub.** A self-hosted Keycloak
+  (`infra/docker-compose.yml`, realm config in `infra/keycloak/`) now
+  issues signed JWTs with a custom `tenant_id` claim; governance-service's
+  `KeycloakAuthMiddleware` (`packages/backend-common`'s
+  `verifyKeycloakToken`, JWKS-verified) replaces `TenantContextMiddleware`
+  for every one of its user-facing routes. Its own
+  `/authorization-check` route deliberately keeps the OLD header stub —
+  that's a service-to-service endpoint (called by the other six services'
+  `PostingAuthorityClient`), and giving it real end-user auth is a
+  separate machine-to-machine (client-credentials) story, not part of
+  this phase. Rolling the same swap out to procurement/manufacturing/
+  sales/accounting/crm/fleet/hr-service (Phase 2), then the Flutter
+  mobile app via PKCE (Phase 3), is tracked, real, out-of-scope work —
+  see `docs/RUNBOOK.md`'s "Keycloak auth retrofit" section for the full
+  verification trail and the Phase 2-4 plan.
 - **Finance connector** (Zoho Books / QuickBooks): `integration_queue` rows
   are written by the ledger service but nothing consumes them yet — the
   actual outbound connector is a separate build.
