@@ -5,7 +5,6 @@ export interface TenantContext {
   tenantId: string;
   userId?: string;
   deviceId?: string;
-  roleCode?: string;
 }
 
 declare global {
@@ -18,17 +17,23 @@ declare global {
 }
 
 /**
- * STUB AUTH — stands in for real Keycloak OIDC token validation (SDD §1.2).
- *
- * Reads tenant/user/device/role identity from headers instead of verifying a
- * signed JWT. This is intentionally isolated to this one file so swapping in
- * real token verification later is a single-file change, not a rewrite of
- * every controller in every service. DO NOT deploy this middleware as-is to
- * any environment that touches real tenant data.
- *
- * Originally duplicated per-service (procurement-service, manufacturing-
- * service each had their own copy); extracted here once a third service
- * (sales-service) needed it too — see root README.md "Known gaps".
+ * STUB AUTH — the pre-Keycloak header-based mechanism SDD §1.2 describes
+ * being replaced by real OIDC token validation. As of the Keycloak auth
+ * retrofit (docs/RUNBOOK.md, Phases 1-3), every service's actual
+ * user-facing HTTP surface has moved to `KeycloakAuthMiddleware`
+ * (governance-service's own DB-backed variant, or this package's shared
+ * dependency-free one) — this class now has exactly one caller left in
+ * the whole platform: governance-service's `/authorization-check`, a
+ * SERVICE-TO-SERVICE endpoint called by `PostingAuthorityClient` with a
+ * plain `x-tenant-id` header (no user identity involved at all, hence no
+ * `x-user-id` sent either — `userId` below is `undefined` on every real
+ * call this class still receives). Real machine-to-machine auth
+ * (client-credentials grant, one Keycloak client per calling service) is
+ * the only thing that would ever retire this last usage; still
+ * out-of-scope. Dropped `roleCode`/`x-role-code` (Phase 4 cleanup) —
+ * confirmed by grep that no authorization logic anywhere ever read it;
+ * `AuthorizationService` always re-resolves role by a DB join from
+ * `userId`, never from a caller-supplied header.
  */
 @Injectable()
 export class TenantContextMiddleware implements NestMiddleware {
@@ -41,7 +46,6 @@ export class TenantContextMiddleware implements NestMiddleware {
       tenantId,
       userId: req.header('x-user-id') ?? undefined,
       deviceId: req.header('x-device-id') ?? undefined,
-      roleCode: req.header('x-role-code') ?? undefined,
     };
     next();
   }

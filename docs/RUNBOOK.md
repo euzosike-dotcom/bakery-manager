@@ -2212,12 +2212,12 @@ simulator verification above.
 
 ## Known gaps still open after this pass (Keycloak auth retrofit, Phase 3)
 
+- ~~`roleCode`/`x-role-code` is still a dead field~~ **Resolved** — see
+  "Keycloak auth retrofit — Phase 4" below.
 - **No machine-to-machine auth** — `/authorization-check` still trusts a
   plain header from a caller assumed to be another backend service on
-  the same trusted network, unchanged since Phase 1.
-- **`roleCode`/`x-role-code` is still a dead field** — Phase 4 cleanup,
-  still not done; this is now the only piece of the Keycloak retrofit
-  left.
+  the same trusted network, unchanged since Phase 1. Permanent, not
+  scheduled for any phase — see Phase 4's own gap list below.
 - **Android redirect scheme wired but not tested** — `build.gradle.kts`'s
   `appAuthRedirectScheme` placeholder matches the iOS URL scheme, but no
   Android emulator run has verified the actual PKCE round-trip on that
@@ -2225,3 +2225,65 @@ simulator verification above.
 - **No biometric re-auth / app-lock** — a device left unlocked with a
   valid stored session has standing access until the access token
   expires and a refresh genuinely fails; out of scope for this pass.
+
+# Keycloak auth retrofit — Phase 4 (cleanup)
+
+The last piece of the four-phase retrofit — no new auth mechanism, just
+retiring what real Keycloak auth made obsolete.
+
+## 1. Dropping `roleCode`/`x-role-code`
+
+Confirmed dead one final time before touching anything: grepped every
+`.ts`/`.dart` file in the platform for `roleCode`/`x-role-code`. The only
+hits outside `packages/backend-common/src/tenant-context.middleware.ts`
+were governance-service's `Role.roleCode` — a completely different,
+legitimate concept (the domain field holding values like
+`STORES_CLERK`/`PROCUREMENT_MGR`, read via a DB join in
+`AuthorizationService`) that was never at risk and was left untouched.
+Neither `KeycloakAuthMiddleware` variant (governance-service's DB-backed
+one, or the shared one in `packages/backend-common`) ever populated
+`TenantContext.roleCode` — only the old `TenantContextMiddleware` stub
+did, from an `x-role-code` header that `PostingAuthorityClient` (the
+stub's one remaining caller, via `/authorization-check`) never actually
+sends. Removed the field from the `TenantContext` interface and the
+header read from `TenantContextMiddleware` itself.
+
+`TenantContextMiddleware` is not deleted — it still has its one real
+caller (governance-service's `/authorization-check`, service-to-service)
+— but its doc comment was rewritten to describe what it actually is now:
+a single-purpose remnant, not "the platform's auth," with a clear pointer
+to why it's still there and what would need to change (a client-
+credentials grant) for it to finally go away entirely.
+
+## 2. Verified nothing broke across all 8 services
+
+Rebuilt `packages/backend-common`, reinstalled it into all 8 backend
+services, rebuilt each with `nest build` (clean, no compile errors —
+expected, since the grep above confirmed zero other references to the
+removed field), restarted all 8, and re-ran the full-stack sanity check:
+a real Bearer token against one representative route per service (all
+`200`), and `GET /audit-log/verify` afterward
+(`{"valid": true, "totalRecords": 42}`) — hash chain intact through
+everything Phases 1-3 had already written, confirming this pass touched
+nothing it shouldn't have.
+
+## Known gaps still open after this pass (Keycloak auth retrofit, Phase 4 — retrofit complete)
+
+The four-phase Keycloak auth retrofit is done. What's left is genuinely
+out of scope for this retrofit, not deferred work within it:
+
+- **No machine-to-machine auth** — `/authorization-check` is, by design,
+  the one place left on the pre-Keycloak header stub. A real
+  client-credentials grant (one Keycloak client per calling service)
+  would retire it; nothing currently plans to build that.
+- **Android PKCE flow untested** — wired (`appAuthRedirectScheme` in
+  `build.gradle.kts` matches the iOS URL scheme) but never run against
+  an actual Android emulator.
+- **No biometric re-auth / app-lock, no self-service signup or password
+  reset, no MFA rollout** — provisioning stays `seed-users.sh`-driven;
+  `users.mfa_enabled` still exists but nothing reads it. All unchanged
+  since Phase 1.
+- **`approval_matrix` thresholds still aren't enforced** — real,
+  configured data, unrelated to auth mechanism; the binary
+  `can_post`/`can_approve`/`can_override` check this retrofit rides on
+  top of was never meant to cover amount-based routing.

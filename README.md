@@ -133,38 +133,15 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 
 ## Known gaps (intentionally out of scope for now)
 
-- **Auth is real Keycloak everywhere now (Phases 1-3 of 4 done) — the
-  Flutter mobile app included.** A self-hosted Keycloak
-  (`infra/docker-compose.yml`, realm config in `infra/keycloak/`) issues
-  signed JWTs carrying custom `tenant_id` and `local_user_id` claims.
-  Every service's HTTP surface runs through a real `KeycloakAuthMiddleware`
-  instead of `TenantContextMiddleware` — governance-service has its own
-  DB-backed variant (it owns the `users` table); the other 7 share one
-  dependency-free version in `packages/backend-common` that reads
-  `local_user_id` straight off the verified token. The Flutter mobile app
-  (`apps/mobile`) now signs in via real Authorization Code + PKCE
-  (`flutter_appauth`, `metrock-mobile` Keycloak client, tokens in
-  `flutter_secure_storage`) instead of hardcoded dev headers — its
-  `ApiClient` sends `Authorization: Bearer <token>` on every call, and
-  the header-stub route exclusions Phase 2 needed (one master-data list
-  route + `/sync/push`/`/sync/pull` per service) were retired once mobile
-  no longer needed them. Offline capture is unaffected — Drift writes
-  never touch the network, so login state only matters for the eventual
-  sync push/pull, never for local capture. `accounting-service` needed no
-  exclusions at any point — no `SyncModule`, no mobile-called route.
-  governance-service's `/authorization-check` is the ONE route still on
-  the old header stub, permanently — it's service-to-service (called by
-  the other services' `PostingAuthorityClient`), and real
-  machine-to-machine auth (client-credentials grant) is a separate,
-  still out-of-scope story. See `docs/RUNBOOK.md`'s "Keycloak auth
-  retrofit" sections for the full verification trail across all three
-  phases, including two real bugs caught along the way: a Phase 1
-  regression that silently broke the mobile Users tab, and a Phase 3
-  discovery that mobile literally cannot function until the Phase 2
-  exclusions are retired (not just a nice-to-have cleanup, since mobile
-  stops sending the old header the moment it has a real token). Phase 4
-  (docs cleanup, drop the dead `roleCode`/`x-role-code` field) is the
-  only piece left.
+- **No machine-to-machine auth for service-to-service calls** —
+  governance-service's `/authorization-check` (called by every other
+  service's `PostingAuthorityClient`) still trusts a plain `x-tenant-id`
+  header from a caller assumed to be another backend service on the same
+  trusted network, rather than a real client-credentials-grant token.
+  This is the ONE place in the whole platform still on the pre-Keycloak
+  header stub, and it's deliberate — see the Keycloak retrofit entry
+  below for why every user-facing route (including the Flutter mobile
+  app) is on real auth now but this single internal call was left alone.
 - **Finance connector** (Zoho Books / QuickBooks): `integration_queue` rows
   are written by the ledger service but nothing consumes them yet — the
   actual outbound connector is a separate build.
@@ -312,3 +289,30 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   the offline-capturable endpoints deliberately aren't, and
   `docs/RUNBOOK.md`'s "Posting-authority retrofit" section for the
   verification trail.
+- ~~Auth is a stub — `TenantContextMiddleware` trusts a plain
+  `x-tenant-id`/`x-user-id`/`x-role-code` header with zero
+  verification~~ **Resolved 2026-08-05**, across four phases: a
+  self-hosted Keycloak (`infra/docker-compose.yml`, realm config in
+  `infra/keycloak/`) now issues signed JWTs carrying `tenant_id` and
+  `local_user_id` claims. **Phase 1** proved the pattern on
+  governance-service alone (`KeycloakAuthMiddleware`, DB-backed since
+  that service owns the `users` table). **Phase 2** rolled it out to the
+  other 7 services via one shared, dependency-free middleware variant in
+  `packages/backend-common` that reads `local_user_id` straight off the
+  token instead of a DB lookup (no service besides governance-service
+  has a grant on `users`). **Phase 3** gave the Flutter mobile app
+  (`apps/mobile`) a real login — Authorization Code + PKCE via
+  `flutter_appauth`, tokens in `flutter_secure_storage`, replacing the
+  hardcoded dev headers every `ApiClient` sent since Slice #1 — then
+  retired the header-stub route exclusions Phase 2 needed once mobile no
+  longer required them. **Phase 4** dropped the now-fully-dead
+  `roleCode`/`x-role-code` field (confirmed by grep the whole way
+  through: no authorization logic anywhere ever read it — role is always
+  resolved by a DB join from `userId`). `TenantContextMiddleware` itself
+  is still there, deliberately, for exactly one route — see the
+  "Known gaps" bullet above. See `docs/RUNBOOK.md`'s four "Keycloak auth
+  retrofit" sections for the complete verification trail, including two
+  real bugs caught rather than shipped silently: a Phase 1 regression
+  that broke the mobile Users tab, and a Phase 3 discovery that mobile
+  literally could not function until Phase 2's exclusions were retired
+  (a hard blocker, not a nice-to-have cleanup).
