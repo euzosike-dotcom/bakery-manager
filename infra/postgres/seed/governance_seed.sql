@@ -8,12 +8,11 @@
 -- Two-tier approval routing for Procurement Purchase Orders: below
 -- 500,000 a Procurement Manager can approve alone; at or above it,
 -- Finance Controller sign-off is required. Demonstrates the
--- `approval_matrix` threshold-routing shape (docs/SDD.md §4.2) — no
--- service in this slice actually enforces it yet (that would mean
--- retrofitting approval gates into procurement-service's PO endpoints,
--- out of scope for proving the Governance module's OWN pattern — see
--- README "Known gaps"), but the master data now exists and is real,
--- queryable configuration rather than a stub.
+-- `approval_matrix` threshold-routing shape (docs/SDD.md §4.2) — enforced
+-- by governance-service's AuthorizationService.checkApprovalAuthority and
+-- wired into procurement-service's PO approve/reject endpoints (see
+-- docs/RUNBOOK.md's "Approval-matrix enforcement" section); this master
+-- data is what that check actually resolves against, not decorative.
 INSERT INTO approval_matrix (tenant_id, module_name, transaction_type, threshold_min, threshold_max, approval_level_1_role_id)
 VALUES
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'PROCUREMENT', 'PURCHASE_ORDER', 0, 500000, '1a946225-e283-4bbe-9c05-939dff09a1cf'),
@@ -26,4 +25,8 @@ VALUES
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'GRN_OVER_RECEIPT_OVERRIDE', 'PROCUREMENT',
      'Manual override of an over-receipt block on a goods receipt line.'),
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'MANUAL_ADJUSTMENT', 'FINANCE',
-     'General-purpose reason for a manual correction with no more specific code.');
+     'General-purpose reason for a manual correction with no more specific code.'),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'INSUFFICIENT_APPROVAL_TIER', 'SECURITY',
+     'A user with real approval authority attempted to approve a transaction above their approval_matrix threshold tier (e.g. a Procurement Manager approving a PO that requires Finance Controller sign-off) — logged automatically, not user-supplied.'),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'NO_APPROVAL_MATRIX_CONFIGURED', 'SECURITY',
+     'An approval was attempted for a module/transaction_type/amount with no matching approval_matrix band — fails closed (denied) rather than silently allowing, since this is a configuration gap, not a legitimate no-approval-needed case.');

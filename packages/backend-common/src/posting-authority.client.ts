@@ -10,6 +10,27 @@ export interface CheckAuthorityParams {
   recordIdRef: string;
 }
 
+export interface CheckApprovalAuthorityParams {
+  tenantId: string;
+  userId?: string;
+  moduleName: string;
+  transactionType: string;
+  recordIdRef: string;
+  amount: number;
+  plantId?: string;
+  /** Which approval_matrix level to check — defaults server-side to 1. */
+  stage?: number;
+}
+
+export interface ApprovalAuthorityResult {
+  authorized: true;
+  roleCode?: string;
+  /** Whether the resolved threshold band names a further approval level
+   *  (approval_level_{stage+1}_role_id) — tells the caller whether to
+   *  advance the transaction's own stage counter or finalize it. */
+  hasNextStage: boolean;
+}
+
 /**
  * Thin HTTP client to governance-service's `POST /authorization-check`
  * (docs/SDD.md §4.2's "Governance warning") — the platform's FIRST
@@ -67,5 +88,50 @@ export class PostingAuthorityClient {
       throw new ForbiddenException(body.message ?? 'Posting authority denied');
     }
     throw new ServiceUnavailableException(body.message ?? `Posting-authority check failed with status ${res.status}`);
+  }
+
+  /**
+   * Calls governance-service's `POST /approval-check` — a deliberately
+   * SEPARATE decision from `checkAuthority` above, not a variant of it:
+   * this resolves an amount against `approval_matrix`'s threshold bands
+   * to find the SPECIFIC role required to approve at this value and
+   * stage, rather than checking a blanket `can_approve` flag (see
+   * governance-service's `AuthorizationService.checkApprovalAuthority`
+   * doc comment for why the binary flag alone can't express "which
+   * tier"). Unlike `checkAuthority`, this returns data on success
+   * (`hasNextStage`) rather than resolving to void — the caller needs it
+   * to decide whether to advance its own transaction's approval stage or
+   * finalize it.
+   */
+  async checkApprovalAuthority(params: CheckApprovalAuthorityParams): Promise<ApprovalAuthorityResult> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.governanceBaseUrl}/approval-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-tenant-id': params.tenantId },
+        body: JSON.stringify({
+          userId: params.userId,
+          moduleName: params.moduleName,
+          transactionType: params.transactionType,
+          recordIdRef: params.recordIdRef,
+          amount: params.amount,
+          plantId: params.plantId,
+          stage: params.stage,
+        }),
+      });
+    } catch (err) {
+      this.logger.error(`Could not reach governance-service for approval-authority check: ${(err as Error).message}`);
+      throw new ServiceUnavailableException('Approval-authority check unavailable — governance-service unreachable');
+    }
+
+    if (res.ok) {
+      return (await res.json()) as ApprovalAuthorityResult;
+    }
+
+    const body = (await res.json().catch(() => ({ message: undefined }))) as { message?: string };
+    if (res.status === 403) {
+      throw new ForbiddenException(body.message ?? 'Approval authority denied');
+    }
+    throw new ServiceUnavailableException(body.message ?? `Approval-authority check failed with status ${res.status}`);
   }
 }

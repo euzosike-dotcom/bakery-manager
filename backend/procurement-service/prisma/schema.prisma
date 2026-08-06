@@ -60,16 +60,18 @@ model Supplier {
 }
 
 model PurchaseOrder {
-  tenantId        String   @map("tenant_id") @db.Uuid
-  poId            String   @map("po_id") @db.Uuid
-  poNumber        String   @map("po_number")
-  supplierId      String   @map("supplier_id") @db.Uuid
-  plantId         String   @map("plant_id") @db.Uuid
-  poDate          DateTime @map("po_date") @db.Date
-  currency        String
-  approvalStatus  String   @map("approval_status")
-  poStatus        String   @map("po_status")
-  totalPoValue    Decimal  @map("total_po_value") @db.Decimal(14, 2)
+  tenantId             String   @map("tenant_id") @db.Uuid
+  poId                 String   @map("po_id") @db.Uuid
+  poNumber             String   @map("po_number")
+  supplierId           String   @map("supplier_id") @db.Uuid
+  plantId              String   @map("plant_id") @db.Uuid
+  poDate               DateTime @map("po_date") @db.Date
+  currency             String
+  approvalStatus       String   @map("approval_status")
+  poStatus             String   @map("po_status")
+  totalPoValue         Decimal  @map("total_po_value") @db.Decimal(14, 2)
+  currentApprovalStage Int      @map("current_approval_stage")
+  pendingApproverRoleId String? @map("pending_approver_role_id") @db.Uuid
 
   supplier Supplier @relation(fields: [tenantId, supplierId], references: [tenantId, supplierId])
   plant    Plant    @relation(fields: [tenantId, plantId], references: [tenantId, plantId])

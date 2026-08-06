@@ -1,8 +1,9 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { KafkaProducerService } from '@metrock/backend-common';
+import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { CreateGoodsReceiptDto, SyncPushResultDto } from './dto/goods-receipt.dto';
+import { RejectPurchaseOrderDto } from './dto/purchase-order-approval.dto';
 
 export interface CreateGoodsReceiptOptions {
   createdOffline: boolean;
@@ -15,6 +16,7 @@ export class ProcurementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly kafka: KafkaProducerService,
+    private readonly postingAuthority: PostingAuthorityClient,
   ) {}
 
   listSuppliers(tenantId: string) {
@@ -178,5 +180,82 @@ export class ProcurementService {
           ? 'Received quantity exceeds remaining PO line quantity — routed to Variance Review, not posted to inventory/ledger yet.'
           : 'GRN posted; grn.posted.v1 emitted per accepted line.',
     };
+  }
+
+  /**
+   * Approves a PO at its current approval_matrix stage. Delegates the
+   * actual "who is allowed to approve this amount" decision entirely to
+   * governance-service's checkApprovalAuthority — this method only acts on
+   * the result (advance the stage counter, or finalize to APPROVED).
+   */
+  async approvePurchaseOrder(tenantId: string, poId: string, userId: string | undefined) {
+    const po = await this.prisma.forTenant(tenantId, (tx) =>
+      tx.purchaseOrder.findUnique({ where: { tenantId_poId: { tenantId, poId } } }),
+    );
+    if (!po) throw new NotFoundException(`Purchase order ${poId} not found`);
+    if (po.approvalStatus !== 'PENDING') {
+      throw new BadRequestException(`Purchase order ${poId} is not pending approval (status=${po.approvalStatus})`);
+    }
+
+    const result = await this.postingAuthority.checkApprovalAuthority({
+      tenantId,
+      userId,
+      moduleName: 'PROCUREMENT',
+      transactionType: 'PURCHASE_ORDER',
+      recordIdRef: poId,
+      amount: Number(po.totalPoValue),
+      plantId: po.plantId,
+      stage: po.currentApprovalStage,
+    });
+
+    const nextStage = po.currentApprovalStage + 1;
+    return this.prisma.forTenant(tenantId, (tx) =>
+      tx.purchaseOrder.update({
+        where: { tenantId_poId: { tenantId, poId } },
+        data: result.hasNextStage
+          ? { currentApprovalStage: nextStage }
+          : { approvalStatus: 'APPROVED', pendingApproverRoleId: null },
+      }),
+    );
+  }
+
+  /**
+   * Rejecting requires the SAME approval-tier gate as approving — a
+   * Procurement Manager can reject what they could have approved, but not
+   * reject a PO that's above their tier (that's Finance's call to make,
+   * even the rejection).
+   */
+  async rejectPurchaseOrder(
+    tenantId: string,
+    poId: string,
+    userId: string | undefined,
+    dto: RejectPurchaseOrderDto,
+  ) {
+    const po = await this.prisma.forTenant(tenantId, (tx) =>
+      tx.purchaseOrder.findUnique({ where: { tenantId_poId: { tenantId, poId } } }),
+    );
+    if (!po) throw new NotFoundException(`Purchase order ${poId} not found`);
+    if (po.approvalStatus !== 'PENDING') {
+      throw new BadRequestException(`Purchase order ${poId} is not pending approval (status=${po.approvalStatus})`);
+    }
+
+    await this.postingAuthority.checkApprovalAuthority({
+      tenantId,
+      userId,
+      moduleName: 'PROCUREMENT',
+      transactionType: 'PURCHASE_ORDER',
+      recordIdRef: poId,
+      amount: Number(po.totalPoValue),
+      plantId: po.plantId,
+      stage: po.currentApprovalStage,
+    });
+
+    this.logger.log(`PO ${poId} rejected by userId=${userId} reasonCode=${dto.reasonCode}`);
+    return this.prisma.forTenant(tenantId, (tx) =>
+      tx.purchaseOrder.update({
+        where: { tenantId_poId: { tenantId, poId } },
+        data: { approvalStatus: 'REJECTED' },
+      }),
+    );
   }
 }

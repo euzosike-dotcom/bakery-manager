@@ -255,9 +255,20 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   authority retrofit" section for the full verification trail (all six
   endpoints, three scenarios each, plus a fail-closed check with
   governance-service killed).
-- **`approval_matrix` thresholds are configured but not enforced** — real,
-  seeded, queryable data, but no service routes a transaction through
-  approval-level checks based on it.
+- **`approval_matrix` amount-based approval routing is enforced on
+  Procurement POs** — `POST /purchase-orders/:poId/approve` and `.../reject`
+  on procurement-service call `governance-service`'s `POST /approval-check`
+  (`AuthorizationService.checkApprovalAuthority`), which resolves the PO's
+  value against `approval_matrix`'s threshold bands to find the SPECIFIC
+  role required at the PO's current approval stage — a stricter check than
+  the binary `can_approve` flag above, since e.g. both `PROCUREMENT_MGR` and
+  `FINANCE_CONTROLLER` have `can_approve=true` but only one is the correct
+  tier for a given amount. Only wired into Procurement POs so far (the one
+  module whose schema — `purchase_orders.current_approval_stage`,
+  `.pending_approver_role_id` — was designed for it); Manufacturing,
+  Accounting, and Fleet have no amount-routed approval flow yet, only the
+  binary posting-authority gate above. See `docs/RUNBOOK.md`'s
+  "Approval-matrix enforcement" section for the full verification trail.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.

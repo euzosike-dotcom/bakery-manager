@@ -2286,4 +2286,139 @@ out of scope for this retrofit, not deferred work within it:
 - **`approval_matrix` thresholds still aren't enforced** — real,
   configured data, unrelated to auth mechanism; the binary
   `can_post`/`can_approve`/`can_override` check this retrofit rides on
-  top of was never meant to cover amount-based routing.
+  top of was never meant to cover amount-based routing. (Closed — see
+  "Approval-matrix enforcement" below.)
+
+## Approval-matrix enforcement
+
+The gap immediately above: `approval_matrix` (module + transaction_type +
+optional plant_id + threshold_min/max + up to three `approval_level_N_role_id`
+columns, `infra/postgres/migrations/003_governance.sql`) was configured and
+seeded since the Governance module shipped, but nothing resolved a real
+transaction's amount against it. The binary `can_approve` flag the posting-
+authority retrofit rides on can't express "which tier" on its own — in the
+seeded data both `PROCUREMENT_MGR` and `FINANCE_CONTROLLER` have
+`can_approve=true`; only `approval_matrix` says which one is required for a
+given amount.
+
+### 1. `governance-service`: `checkApprovalAuthority`
+
+A new method on the existing `AuthorizationService`, deliberately NOT a
+variant of `checkAuthority` — genuinely different question, same audit sink.
+Given `{moduleName, transactionType, amount, plantId?, stage?}`:
+
+- Resolves the matching `approval_matrix` band via `PrismaService.forTenant`,
+  preferring a plant-specific row over the tenant-wide one (`plant_id IS
+  NULL`) when the caller supplies a `plantId` — two sequential `findFirst`
+  calls, not one `OR` query, so the plant-specific match always wins.
+- Treats `threshold_max` as an EXCLUSIVE upper bound: an amount exactly at
+  500,000 falls into the *next* band up, matching this repo's original
+  Governance-slice seed comment ("at or above it, Finance Controller sign-off
+  is required").
+- No matching band at all → fail-closed DENY, `reason_code
+  NO_APPROVAL_MATRIX_CONFIGURED` — a configuration gap is not the same thing
+  as "no approval needed," so it must never silently pass.
+- A band exists but the caller's role isn't the exact
+  `approval_level_{stage}_role_id` → DENY, `reason_code
+  INSUFFICIENT_APPROVAL_TIER` (a REAL role, just the wrong tier) or the
+  existing `UNAUTHORIZED_POSTING_ATTEMPT` (no identity at all).
+- Success → audits `action_type APPROVAL_CHECK`, returns `{authorized: true,
+  roleCode, hasNextStage}` — `hasNextStage` tells the caller whether
+  `approval_level_{stage+1}_role_id` is populated, i.e. whether to advance
+  its own stage counter or finalize.
+
+Exposed at `POST /approval-check` via a new, separate
+`ApprovalAuthorityController` (not a method added to the existing
+`AuthorizationController`, whose own `@Controller('authorization-check')`
+decorator would have nested the route under
+`authorization-check/approval-check` instead of a clean top-level path).
+`app.module.ts`'s `TenantContextMiddleware`/`KeycloakAuthMiddleware`
+exclusion list, previously just `authorization-check`, now covers both —
+still exactly the two permanent, deliberate service-to-service routes (see
+the "No machine-to-machine auth" gap above; nothing here changes that).
+
+### 2. `PostingAuthorityClient`: `checkApprovalAuthority`
+
+Same class in `packages/backend-common`, a new method alongside the existing
+`checkAuthority` — same fail-closed-on-403-or-unreachable pattern, but unlike
+`checkAuthority` (resolves to `void`) this one returns the parsed
+`{authorized, roleCode, hasNextStage}` body, since the caller needs
+`hasNextStage` to decide what to do next.
+
+### 3. `procurement-service`: PO approve/reject
+
+The only module wired up so far — the one whose schema
+(`purchase_orders.current_approval_stage`, `.pending_approver_role_id`,
+`.total_po_value`) was designed for exactly this from
+`004_procurement.sql` onward. `ProcurementModule` provides
+`PostingAuthorityClient` as an inline factory provider (this service has no
+`common/governance.module.ts` wrapper the way accounting/sales/fleet/hr do —
+it already provides `KafkaProducerService` the same inline-factory way, so
+this follows that existing convention rather than introducing a new file).
+
+- `POST /purchase-orders/:poId/approve` — 404 if missing, 400 if not
+  `PENDING`, else calls `checkApprovalAuthority` for the PO's value at its
+  `currentApprovalStage`. On success: advances `currentApprovalStage` if
+  `hasNextStage`, otherwise sets `approvalStatus = APPROVED`.
+- `POST /purchase-orders/:poId/reject` (body: `{reasonCode}`) — same
+  authority gate as approve (a Procurement Manager can reject what they
+  could have approved, not what's above their tier), sets `approvalStatus =
+  REJECTED`.
+
+### 4. Seed data
+
+`infra/postgres/seed/governance_seed.sql` already had the two-tier
+`approval_matrix` bands (below 500,000 → `PROCUREMENT_MGR`, at/above →
+`FINANCE_CONTROLLER`) plus two new `reason_codes` rows
+(`INSUFFICIENT_APPROVAL_TIER`, `NO_APPROVAL_MATRIX_CONFIGURED`).
+`infra/postgres/seed/procurement_approval_seed.sql` is new: three fresh
+`PENDING` POs straddling both bands (PO-2026-00002 at 320,000, PO-2026-00003
+at 750,000, PO-2026-00004 at 200,000) — `dev_seed.sql`'s original
+PO-2026-00001 is already `APPROVED` and can't exercise the approve/reject
+flow from a clean state. `dev_seed.sql` also gained two users that had
+drifted out of sync with the live dev database (Chidinma Eze, PROCUREMENT_MGR,
+previously only ever inserted ad hoc via `psql` during an earlier phase) and
+one brand new one (Tunde Bakare, FINANCE_CONTROLLER) — needed because proving
+tier-specific routing requires a real user in each tier, not just the one
+`STORES_CLERK` seed user.
+
+### 5. Verification — real Keycloak tokens, all five scenarios
+
+Using `metrock-test-client` (the realm's `directAccessGrantsEnabled: true`
+client, for scripted password-grant token minting — `metrock-mobile` is
+PKCE-only and rejects direct grants by design):
+
+1. **Correct-tier approval succeeds**: Chidinma (`PROCUREMENT_MGR`) approves
+   PO-2026-00002 (320,000, below threshold) → `201`, `approvalStatus:
+   APPROVED`.
+2. **Wrong-tier attempt denied**: Chidinma tries PO-2026-00003 (750,000,
+   above threshold) → `403`, message names her role, the amount, and the
+   stage.
+3. **Correct high tier succeeds**: Tunde (`FINANCE_CONTROLLER`) approves the
+   same PO-2026-00003 → `201`, `approvalStatus: APPROVED`.
+4. **No approval authority at all denied**: Amaka (`STORES_CLERK`,
+   `can_approve=false`) tries PO-2026-00004 → `403`.
+5. **Reject works**: Chidinma rejects PO-2026-00004 with `reasonCode:
+   MANUAL_ADJUSTMENT` → `201`, `approvalStatus: REJECTED`.
+
+`audit_log` shows exactly the expected five rows —
+`APPROVAL_CHECK`/`override_flag=false` for the two successes,
+`APPROVAL_DENIED`/`override_flag=true`/`reason_code
+INSUFFICIENT_APPROVAL_TIER` for both denials, correct `user_id` and
+`record_id_ref` (the PO id) on every row. `GET /audit-log/verify` still
+returns `{"valid":true}` afterward — the new rows extend the same hash chain
+cleanly.
+
+### Known gaps after this pass
+
+- Only Procurement POs are wired up. Manufacturing, Accounting, and Fleet
+  have no amount-routed approval flow — only the binary posting-authority
+  gate from the earlier retrofit.
+- No multi-stage escalation has actually been exercised — the mechanism is
+  stage-aware (`hasNextStage`, `approval_level_2/3_role_id`) from day one,
+  but no seed data populates a second or third tier yet, so it's untested
+  beyond single-stage bands.
+- No plant-specific `approval_matrix` row exists in seed data either — the
+  plant-preferred-over-global resolution logic is implemented and
+  `purchase_orders.plant_id` is real, but nothing currently exercises the
+  plant-specific branch.

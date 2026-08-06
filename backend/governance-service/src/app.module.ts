@@ -31,16 +31,17 @@ import { AuthorizationModule } from './authorization/authorization.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    // `/authorization-check` is the ONE remaining route on the OLD header
-    // stub — a SERVICE-TO-SERVICE endpoint called by sales/accounting/
-    // fleet/hr-service's PostingAuthorityClient (packages/backend-common)
-    // with a plain x-tenant-id header, not a user's own Bearer token.
-    // Real machine-to-machine auth (client-credentials grant, one
-    // Keycloak client per caller) is a separate, still out-of-scope
-    // story. `GET /users`' own exclusion (added for the Flutter mobile
-    // Users tab) was retired here in Phase 3 once the mobile app started
-    // sending real Bearer tokens for every call — see docs/RUNBOOK.md.
-    consumer.apply(TenantContextMiddleware).forRoutes('authorization-check');
-    consumer.apply(KeycloakAuthMiddleware).exclude('authorization-check').forRoutes('*');
+    // `/authorization-check` and `/approval-check` are the two remaining
+    // routes on the OLD header stub — both SERVICE-TO-SERVICE endpoints
+    // called by other backend services' `PostingAuthorityClient`
+    // (packages/backend-common) with a plain x-tenant-id header, not a
+    // user's own Bearer token. Real machine-to-machine auth
+    // (client-credentials grant, one Keycloak client per caller) is a
+    // separate, still out-of-scope story. `GET /users`' own exclusion
+    // (added for the Flutter mobile Users tab) was retired here in
+    // Phase 3 once the mobile app started sending real Bearer tokens for
+    // every call — see docs/RUNBOOK.md.
+    consumer.apply(TenantContextMiddleware).forRoutes('authorization-check', 'approval-check');
+    consumer.apply(KeycloakAuthMiddleware).exclude('authorization-check', 'approval-check').forRoutes('*');
   }
 }
