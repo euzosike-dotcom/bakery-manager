@@ -2422,3 +2422,107 @@ cleanly.
   plant-preferred-over-global resolution logic is implemented and
   `purchase_orders.plant_id` is real, but nothing currently exercises the
   plant-specific branch.
+
+## CI + test suite, Phase 1: pilot on governance-service
+
+Every module in this platform up to now has been verified by hand — curl,
+psql, `docker exec`, re-run every phase. Nothing regresses automatically.
+This is the first step of a 4-phase plan to fix that: stand up the CI
+pipeline shape on one service before multiplying it across the other 7 Node
+services and the Go `ledger-service` (Phase 2), then turn the manual
+curl/psql verification this session has been doing by hand into an
+automated integration suite against real Postgres (Phase 3), then Flutter
+tests + branch protection (Phase 4).
+
+governance-service is the pilot, not an arbitrary starting point: it is the
+security-critical service, and it already holds the two most interesting
+things to test — `checkAuthority` (the posting-authority retrofit) and
+`checkApprovalAuthority` (this session's approval-matrix enforcement),
+plus the hash-chained audit log both of them write to.
+
+### 1. `jest.config.js`
+
+None of the 8 NestJS services had one — `package.json`'s `"test": "jest"`
+script was Nest CLI scaffolding, never actually wired to run TypeScript
+(`npx jest --listTests` found zero tests, silently, rather than failing —
+would have kept silently finding zero tests forever without a `ts-jest`
+preset telling Jest how to transform `.spec.ts` files at all). Added
+`backend/governance-service/jest.config.js`: `ts-jest` preset, `rootDir:
+'src'`, matching `*.spec.ts` files colocated with the code they test (the
+same layout Nest's own schematics template already assumes, just never
+actually used in this repo before now).
+
+### 2. `authorization.service.spec.ts` — 16 tests
+
+Unit-level, no real Postgres: `PrismaService.forTenant` and `AuditService`
+are both hand-rolled `jest.fn()` fakes, not a `TestingModule` — cheaper to
+read and reason about for pure business logic with only two collaborators.
+
+Covers `checkAuthority`: authorized/denied paths, denial audits with
+`override_flag=true`, missing `userId` treated as automatic denial (not a
+validation error — this is explicitly the bypass-attempt scenario SDD
+§4.2 describes, not a special case).
+
+Covers `checkApprovalAuthority` — the newer, stricter check — more
+thoroughly, since it has more real branches to get wrong: correct-tier
+authorization, wrong-tier denial (`INSUFFICIENT_APPROVAL_TIER`), no
+identity (`UNAUTHORIZED_POSTING_ATTEMPT`), no matching band at all
+(`NO_APPROVAL_MATRIX_CONFIGURED`, fail-closed), plant-specific-band
+short-circuit (asserts `findFirst` is called exactly once, not that the
+result merely looks right — a regression that queried both bands
+unconditionally would pass a looser assertion), fallback to the
+tenant-wide band when no plant-specific one matches, the
+`thresholdMax: { gt: amount }` exclusive-boundary query shape (asserted
+directly on the constructed `where` clause, since a real Postgres
+boundary check needs Phase 3, not a mock), `hasNextStage` resolved
+correctly across all three stages via `it.each`, and out-of-range stage
+values (0, 4) rejected with `BadRequestException`.
+
+### 3. `audit.service.spec.ts` — 7 tests
+
+The interesting design choice here: these tests do NOT reimplement SHA-256
+hashing or canonical-JSON serialization to compute an "expected" hash and
+compare — that would test the test's own copy of the algorithm, not
+`AuditService`'s. Instead they call the REAL `recordEntry` to produce real
+chained rows (mocking only the Prisma `tx` boundary — `$queryRaw` and
+`findFirst`/`findMany`), then feed those real rows into the REAL
+`verifyChain` and assert it reports them valid. Tampering with a field or
+splicing a `prevHash` after the fact is what proves `verifyChain` actually
+detects a broken chain, the same property `GET /audit-log/verify` proves
+in every prior phase's curl-based verification — now exercised without a
+running Postgres.
+
+### 4. `.github/workflows/ci.yml`
+
+Triggers on push/PR to `master`. Single job for now (`governance-service`
+— Phase 2 turns this into a matrix). The one non-obvious step:
+`@metrock/backend-common`'s `dist/` is gitignored and every service depends
+on it via `file:../../packages/backend-common`, so a fresh CI checkout has
+to `npm install && npm run build` that package FIRST, before
+`governance-service`'s own `npm install` can resolve it. `prisma generate`
+needs a syntactically valid `DATABASE_URL` in the job env even though it
+never connects to it — generate reads the schema statically.
+
+Verified the whole pipeline locally before trusting the YAML: wiped
+`packages/backend-common/dist` and `backend/governance-service/node_modules`
+entirely and re-ran every step from scratch in order — install, build,
+prisma generate, build, test — all green, service still healthy afterward
+(`curl localhost:3008/health` still `401`, not `ECONNREFUSED`).
+
+### Known gaps after this pass
+
+- Only governance-service has tests. The other 7 Node services and
+  `ledger-service` (Go) have none yet — Phase 2.
+- No integration tests against a real database — everything here mocks the
+  Prisma transaction boundary. The actual SQL-level behavior this session
+  spent time proving manually (RLS isolation, the `gt` vs `gte` threshold
+  boundary, the five approval-matrix curl scenarios) is still unverified
+  by anything automated — Phase 3.
+- No lint in CI — none of the 8 services has a working ESLint config
+  despite every `package.json` shipping a `"lint": "eslint ..."` script
+  (`npx eslint` fails immediately: no `eslint.config.js` anywhere in the
+  repo, pre-existing and repo-wide, not introduced by this pass). Fixing
+  it is a separate task from standing up tests; the CI workflow here only
+  builds and tests.
+- No coverage threshold enforced — `collectCoverageFrom` is configured but
+  nothing fails the build on a coverage drop yet.

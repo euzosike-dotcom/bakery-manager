@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  # Phase 1 of the CI + test suite plan (docs/RUNBOOK.md): governance-service
+  # is the pilot, proving out the pipeline shape (build @metrock/backend-common
+  # first since it's a gitignored, build-from-source `file:` dependency, then
+  # build + test the one service) before Phase 2 turns this into a matrix over
+  # the other 7 Node services + the Go ledger-service.
+  governance-service:
+    runs-on: ubuntu-latest
+    env:
+      # prisma generate reads the schema statically and does not connect to
+      # this URL, but requires a syntactically valid one to be present.
+      DATABASE_URL: postgresql://user:password@localhost:5432/metrock_erp?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build @metrock/backend-common
+        working-directory: packages/backend-common
+        run: |
+          npm install
+          npm run build
+
+      - name: Install governance-service dependencies
+        working-directory: backend/governance-service
+        run: npm install
+
+      - name: Generate Prisma client
+        working-directory: backend/governance-service
+        run: npx prisma generate
+
+      - name: Build
+        working-directory: backend/governance-service
+        run: npm run build
+
+      - name: Test
+        working-directory: backend/governance-service
+        run: npm test -- --ci

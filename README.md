@@ -269,6 +269,17 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   Accounting, and Fleet have no amount-routed approval flow yet, only the
   binary posting-authority gate above. See `docs/RUNBOOK.md`'s
   "Approval-matrix enforcement" section for the full verification trail.
+- **Automated test coverage exists for governance-service only** — every
+  other module in this platform has been verified exclusively by hand
+  (curl, psql, re-run at the end of each phase), and still is.
+  `backend/governance-service` now has real Jest unit tests
+  (`AuthorizationService`, `AuditService`'s hash chain) and a GitHub
+  Actions workflow (`.github/workflows/ci.yml`) building and running them
+  on every push/PR — Phase 1 of a 4-phase plan. The other 7 Node services,
+  the Go `ledger-service`, and the Flutter mobile app have none yet, and
+  nothing tests against a real database (everything mocks the Prisma
+  transaction boundary) — see `docs/RUNBOOK.md`'s "CI + test suite, Phase
+  1" section.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.
