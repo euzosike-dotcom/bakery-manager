@@ -2440,6 +2440,11 @@ things to test — `checkAuthority` (the posting-authority retrofit) and
 `checkApprovalAuthority` (this session's approval-matrix enforcement),
 plus the hash-chained audit log both of them write to.
 
+Running the suite locally: `cd backend/governance-service && npm test`
+(needs `packages/backend-common` built first — `cd packages/backend-common
+&& npm install && npm run build` — since it's a `file:` dependency with a
+gitignored `dist/`, same as the CI job below).
+
 ### 1. `jest.config.js`
 
 None of the 8 NestJS services had one — `package.json`'s `"test": "jest"`
