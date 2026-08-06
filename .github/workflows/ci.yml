@@ -7,13 +7,23 @@ on:
     branches: [master]
 
 jobs:
-  # Phase 1 of the CI + test suite plan (docs/RUNBOOK.md): governance-service
-  # is the pilot, proving out the pipeline shape (build @metrock/backend-common
-  # first since it's a gitignored, build-from-source `file:` dependency, then
-  # build + test the one service) before Phase 2 turns this into a matrix over
-  # the other 7 Node services + the Go ledger-service.
-  governance-service:
+  # Phase 1 piloted this shape on governance-service alone; Phase 2 turns it
+  # into a matrix over the other 7 Node services now that each has its own
+  # jest.config.js + spec file (docs/RUNBOOK.md's "CI + test suite" sections).
+  node-services:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - governance-service
+          - procurement-service
+          - manufacturing-service
+          - sales-service
+          - accounting-service
+          - fleet-service
+          - hr-service
+          - crm-service
     env:
       # prisma generate reads the schema statically and does not connect to
       # this URL, but requires a syntactically valid one to be present.
@@ -31,18 +41,44 @@ jobs:
           npm install
           npm run build
 
-      - name: Install governance-service dependencies
-        working-directory: backend/governance-service
+      - name: Install ${{ matrix.service }} dependencies
+        working-directory: backend/${{ matrix.service }}
         run: npm install
 
       - name: Generate Prisma client
-        working-directory: backend/governance-service
+        working-directory: backend/${{ matrix.service }}
         run: npx prisma generate
 
       - name: Build
-        working-directory: backend/governance-service
+        working-directory: backend/${{ matrix.service }}
         run: npm run build
 
       - name: Test
-        working-directory: backend/governance-service
+        working-directory: backend/${{ matrix.service }}
         run: npm test -- --ci
+
+  # ledger-service is Go, not Node — separate job, no matrix entry above.
+  # Covers only the pure helper functions (amountFromPayload, nullableUUID)
+  # for now; PostingEngine.Handle itself needs a real *pgxpool.Pool (a
+  # concrete struct, not mockable the way Prisma's tx boundary is) and is
+  # deferred to Phase 3's integration tests against real Postgres.
+  ledger-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build
+        working-directory: backend/ledger-service
+        run: go build ./...
+
+      - name: Vet
+        working-directory: backend/ledger-service
+        run: go vet ./...
+
+      - name: Test
+        working-directory: backend/ledger-service
+        run: go test ./...

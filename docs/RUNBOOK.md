@@ -2531,3 +2531,100 @@ prisma generate, build, test — all green, service still healthy afterward
   builds and tests.
 - No coverage threshold enforced — `collectCoverageFrom` is configured but
   nothing fails the build on a coverage drop yet.
+
+## CI + test suite, Phase 2: the other 7 Node services + the Go ledger-service
+
+Same shape as Phase 1, applied everywhere: `jest.config.js` + a spec file
+per service, `.github/workflows/ci.yml` turned into a matrix job. Not
+chasing coverage percentage — each service gets tests for the logic that's
+actually risky to get wrong, identified the same way Phase 1 picked
+governance-service's two methods: read the service's own doc comments for
+what it says matters, then test that.
+
+### What each service actually tests
+
+- **procurement-service** (8 tests) — the over-receipt guard in
+  `createGoodsReceipt` (within-quantity posts and publishes; over-quantity
+  routes to `NEEDS_REVIEW` with no Kafka publish), this session's PO
+  approve/reject stage transitions (finalizes to `APPROVED` vs. advances
+  `currentApprovalStage` depending on `hasNextStage`, rejects a non-PENDING
+  PO without even calling the authority check), and idempotent GRN replay.
+- **manufacturing-service** (9 tests) — the yield-percent formula
+  (`output / input * 100`), including the real historical bug it guards
+  against: converting output through the SKU's `standardWeightKg` before
+  computing yield, since 870 discrete loaves against 348kg of ingredients
+  is a meaningless raw ratio (caught during manual verification as a
+  nonsensical 250% — see `production.service.ts`'s own comment). Also: an
+  unapproved recipe version routes to `NEEDS_REVIEW` with no ledger
+  postings; yield below threshold still closes and posts, only flags;
+  favorable vs. unfavorable variance event selection; idempotent replay.
+- **sales-service** (5 tests) — the capital gate, the module's entire
+  reason for existing: within-capital confirms and posts, over-capital
+  blocks with `NEEDS_REVIEW` and no ledger publish, existing outstanding
+  exposure is correctly subtracted from approved capital before the
+  comparison (not just checked against the raw approved figure), the
+  boundary is inclusive (`<=`, an order landing exactly on available
+  capital is NOT blocked), and idempotent replay.
+- **accounting-service** (4 tests) — `ReportsService`'s Trial
+  Balance/P&L/Balance Sheet arithmetic, using a genuinely balanced trial
+  balance fixture (total debits == total credits) so the
+  Assets-vs-Liabilities+Equity+NetIncome identity documented in the class's
+  own doc comment can actually be asserted as an equality, not just
+  eyeballed.
+- **fleet-service** (5 tests) — the fuel-variance tolerance check (within
+  tolerance opens no maintenance request; outside tolerance does), Matrix
+  Scenario #9 (a fuel record against a since-CANCELLED trip is still
+  accepted and posted, only flagged via `orphanedTripReference`, never
+  rejected), 404 on missing vehicle, idempotent replay.
+- **hr-service** (5 tests) — Payroll Pool = Plant Revenue x Payroll Ratio
+  and per-employee salary = Pool x Grade Weight, computed from confirmed
+  sales orders; duplicate run for the same plant+period rejected;
+  `postRun` calls `checkAuthority` before posting and publishes the net
+  salary total; already-POSTED run rejected.
+- **crm-service** (3 tests) — customer-not-found 404 and idempotent
+  replay on Activities, plus a regression test for a real bug fixed during
+  this platform's build (`docs/RUNBOOK.md`'s "Vertical Slice #4" §6):
+  `findAll`'s `syncSeq` BigInt-to-string conversion, asserted against the
+  actual failure mode (`JSON.stringify` throwing on a raw BigInt), not
+  just the type of the returned value.
+- **ledger-service (Go, 5 sub-tests across 2 test functions)** —
+  `amountFromPayload` (extracts a named float64 field; returns false on
+  missing, wrong-typed, or nil payload) and `nullableUUID`. Deliberately
+  NOT `PostingEngine.Handle` itself: it takes a real `*pgxpool.Pool`, a
+  concrete struct rather than an interface, so it can't be mocked at the
+  boundary the way `PrismaService.forTenant` was for every Node service —
+  exercising it needs a real Postgres, which is Phase 3's job, not this
+  one's.
+
+62 Node tests + 5 Go sub-tests total, all passing. Every service's `npm
+install && prisma generate && npm run build && npm test` was also run from
+a full clean `node_modules` wipe (spot-checked on sales-service and
+crm-service, matching Phase 1's own clean-slate verification) before
+trusting the CI matrix, and all 8 running dev services stayed healthy
+(`curl .../health` still returning `401`, not `ECONNREFUSED`) throughout —
+none of this touched anything at runtime.
+
+### `.github/workflows/ci.yml` becomes a matrix
+
+The single `governance-service` job from Phase 1 is now a
+`strategy.matrix.service` job (`fail-fast: false`, so one service's failure
+doesn't cancel the other seven mid-run) looping the same five steps
+(install `backend-common`, install, `prisma generate`, build, test) across
+all 8 Node services. `ledger-service` gets its own separate job since it's
+Go, not Node — `go build`, `go vet`, `go test`.
+
+### Known gaps after this pass
+
+- Still no integration tests against a real database anywhere — every test
+  in both Phase 1 and Phase 2 mocks the Prisma transaction boundary (or, for
+  Go, tests only the DB-independent pure functions). Phase 3.
+- Coverage is uneven by design, not by oversight: some services have one
+  well-chosen test file covering their single riskiest method
+  (`sales-service`, `hr-service`'s calculateRun/postRun), others have none
+  of their secondary services tested at all (e.g. `AgentsService`,
+  `NcrService`, `InvoicesService`/`BillsService`/`JournalsService`,
+  `VehiclesService`/`MaintenanceService`/`TripsService`,
+  `EmployeesService`/`AttendanceService`, `CustomersService`,
+  every `sync.service.ts`). This pass targeted the highest-value logic per
+  service, not full coverage of every controller/service pair.
+- The Flutter mobile app and `apps/mobile/test/` remain untouched — Phase 4.

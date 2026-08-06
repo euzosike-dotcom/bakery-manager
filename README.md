@@ -269,17 +269,28 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   Accounting, and Fleet have no amount-routed approval flow yet, only the
   binary posting-authority gate above. See `docs/RUNBOOK.md`'s
   "Approval-matrix enforcement" section for the full verification trail.
-- **Automated test coverage exists for governance-service only** — every
-  other module in this platform has been verified exclusively by hand
-  (curl, psql, re-run at the end of each phase), and still is.
-  `backend/governance-service` now has real Jest unit tests
-  (`AuthorizationService`, `AuditService`'s hash chain) and a GitHub
-  Actions workflow (`.github/workflows/ci.yml`) building and running them
-  on every push/PR — Phase 1 of a 4-phase plan. The other 7 Node services,
-  the Go `ledger-service`, and the Flutter mobile app have none yet, and
-  nothing tests against a real database (everything mocks the Prisma
-  transaction boundary) — see `docs/RUNBOOK.md`'s "CI + test suite, Phase
-  1" section.
+- **Automated test coverage exists for all 8 Node services + the Go
+  `ledger-service`'s pure logic, but is uneven and mocks the database
+  everywhere** — every module was previously verified exclusively by hand
+  (curl, psql, re-run at the end of each phase); Phases 1-2 of a 4-phase
+  plan added real Jest unit tests (62 tests) targeting each service's
+  single riskiest piece of business logic — governance-service's
+  authority/approval checks and hash-chained audit log, procurement's
+  over-receipt guard and PO approve/reject, manufacturing's yield formula,
+  sales' capital gate, accounting's report arithmetic, fleet's fuel-variance
+  tolerance, HR's revenue-based payroll calculation, and a regression test
+  for a real historical BigInt-serialization bug in CRM — plus 5 Go
+  sub-tests for `ledger-service`'s pure `amountFromPayload`/`nullableUUID`
+  helpers (not `PostingEngine.Handle` itself, which needs a real Postgres).
+  A GitHub Actions matrix workflow (`.github/workflows/ci.yml`) builds and
+  runs all of it on every push/PR. Coverage is intentionally NOT
+  comprehensive — most services' secondary controllers (agents, NCR,
+  invoices/bills/journals, vehicles/maintenance/trips, employees/
+  attendance, customers, every `sync.service.ts`) have no tests yet, the
+  Flutter mobile app has none, and nothing anywhere tests against a real
+  database (every test mocks the Prisma transaction boundary, or for Go,
+  tests only DB-independent pure functions) — see `docs/RUNBOOK.md`'s "CI
+  + test suite" Phase 1 and Phase 2 sections.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.
