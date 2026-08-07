@@ -2628,3 +2628,127 @@ Go, not Node — `go build`, `go vet`, `go test`.
   every `sync.service.ts`). This pass targeted the highest-value logic per
   service, not full coverage of every controller/service pair.
 - The Flutter mobile app and `apps/mobile/test/` remain untouched — Phase 4.
+
+## CI + test suite, Phase 3: real Postgres, not a mock
+
+Phase 1 and 2's 62 Node tests + 5 Go sub-tests all mock the Prisma
+transaction boundary (or, for Go, test only DB-independent pure
+functions) — deliberately, and documented as a gap in both phases'
+"Known gaps" sections. This phase closes the two things that gap
+concretely could not catch: whether RLS actually isolates tenants (a
+claim this repo has only ever verified by hand, going back to the very
+first vertical slice — see "Least-privilege app role + RLS verification"
+above), and whether the real SQL a service issues (raw `$executeRaw`
+inserts, Prisma `update` calls, composite keys) is actually correct
+against a real database, not just correct against a mock that can't
+notice a wrong column name or WHERE clause.
+
+### 1. Where the tests live, and why they're not in the Phase 1/2 suite
+
+`backend/procurement-service/test/*.integration-spec.ts`, run via a new
+`npm run test:integration` script and a separate `jest-integration.config.js`
+(`rootDir: 'test'`, matching `*.integration-spec.ts` — the existing
+`jest.config.js` scopes to `rootDir: 'src'` and `*.spec.ts`, so there's no
+overlap; the unit suite and the integration suite can never accidentally
+run together). This mirrors Nest's own `test/*.e2e-spec.ts` convention,
+named `integration` rather than `e2e` here since nothing HTTP is involved
+— these call `ProcurementService` methods directly against a real
+`PrismaService`, not a running server.
+
+Piloted on procurement-service alone, same reasoning as Phase 1 picking
+governance-service: it's the module docs/RUNBOOK.md has already manually
+verified RLS against (the exact 3-scenario proof this phase automates),
+and this session's own approval_matrix work gives it the freshest,
+best-understood SQL to test.
+
+### 2. `rls.integration-spec.ts` — the 3-scenario RLS proof, automated
+
+The exact three `psql` scenarios documented as a MANUAL check since this
+repo's first vertical slice ("Least-privilege app role + RLS verification"
+above: wrong tenant → 0, correct tenant → N, no context → 0), run through
+the real `procurement_svc` least-privilege role (not `metrock`, which is a
+Postgres superuser and bypasses RLS unconditionally — running this through
+the wrong role would prove nothing):
+
+- Correct (seeded) tenant context → returns the real seeded
+  `purchase_orders` rows.
+- A freshly-generated, syntactically-valid UUID as tenant context —
+  deliberately not a real second `tenant_registry` row, since the RLS
+  policy (`tenant_id = current_tenant_id()`) never joins out to validate
+  the tenant exists — returns zero rows, even though the table
+  demonstrably has data.
+- No tenant context set at all (bypassing `forTenant` entirely) → also
+  zero rows, proving the fail-CLOSED default: `current_tenant_id()` reads
+  `current_setting('app.tenant_id', true)`, NULL when unset, and
+  `tenant_id = NULL` is never true under SQL's three-valued logic.
+
+### 3. `procurement.integration-spec.ts` — real SQL, two collaborators still faked
+
+Each test inserts its own fresh throwaway PO (`randomUUID()` po_id, real
+seeded supplier/plant/warehouse ids) rather than depending on this
+session's already-mutated seed POs (PO-2026-00002 through 00004 are no
+longer all `PENDING` after the manual approval-matrix verification earlier
+this session). `procurement_svc` has no DELETE grant
+(`007_app_role.sql` — SELECT/INSERT/UPDATE only), so these rows are never
+cleaned up; harmless, since each run uses a fresh id and CI's Postgres
+service container is destroyed with the job regardless.
+
+`KafkaProducerService` and `PostingAuthorityClient` are still `jest.fn()`
+fakes — this file is testing procurement-service's own SQL, not whether a
+Kafka broker or governance-service is reachable, the same boundary
+ledger-service's own `PostingEngine.Handle` deferral draws in Phase 2.
+
+Three tests: an over-receipt persists as `NEEDS_REVIEW` in real
+`goods_receipts` WITHOUT advancing `purchase_order_lines.received_qty`
+(verified via a follow-up raw `SELECT`, not by trusting the service's own
+return value); replaying the same `clientEventId` against real Postgres
+inserts exactly one `goods_receipts` row; `approvePurchaseOrder` actually
+flips `purchase_orders.approval_status` to `APPROVED` in the database.
+
+### 4. `.github/workflows/ci.yml` gains a `procurement-integration` job
+
+A `postgres:16-alpine` service container (same image/credentials as
+`infra/docker-compose.yml`), then the exact same migration+seed sequence
+`docs/RUNBOOK.md`'s "2. Run migrations + seed data" has documented as a
+manual step since the start of this project — run for real in CI for the
+first time.
+
+**A real bug this surfaced immediately**: a naive `for f in
+infra/postgres/seed/*.sql` loop glob-sorts alphabetically —
+`crm_seed.sql` before `dev_seed.sql` — but `crm_seed.sql`'s `INSERT INTO
+customers` depends on the `tenant_registry` row `dev_seed.sql` creates.
+`psql` does not fail the shell on a SQL error by default, so the loop
+reported success while `customers` silently stayed empty — caught only
+by explicitly counting rows after seeding, not by trusting a clean exit
+code. Fixed two ways: `dev_seed.sql` now runs explicitly first, then
+every other seed file in any order; every `psql` invocation (migrations
+and seed) now passes `-v ON_ERROR_STOP=1`, so this whole class of bug
+fails the CI job loudly instead of producing quietly incomplete data.
+
+Verified the entire job's logic locally against a genuinely fresh
+`postgres:16-alpine` container (not the long-running dev one, which has
+drift from this session's own manual testing) before trusting the YAML —
+same rigor as Phase 1/2's clean-`node_modules` checks, extended here to a
+clean database: migrations, seed (with the ordering bug caught and fixed
+mid-verification), `prisma generate`, and all 6 integration tests, all
+green from cold. The 8 running dev services and the persistent dev
+Postgres container were confirmed unaffected throughout.
+
+### Known gaps after this pass
+
+- Only procurement-service has real-Postgres integration tests. The RLS
+  proof is table-agnostic in principle (the same 3-scenario pattern
+  applies to every RLS-protected table in the schema) but only exercises
+  `purchase_orders` so far.
+- No full HTTP-level test exists anywhere — these integration tests call
+  service classes directly, not through a running Nest server + Bearer
+  token. The five approval-matrix scenarios this session proved by hand
+  with real Keycloak tokens (docs/RUNBOOK.md's "Approval-matrix
+  enforcement" section) remain a manual curl proof, not an automated one
+  — standing up Keycloak + governance-service + procurement-service
+  together in CI is a meaningfully bigger lift than a single Postgres
+  service container, and is the natural next slice here, not Phase 4's.
+- Offline-sync idempotency is proven for `createGoodsReceipt` specifically,
+  not for the `/sync/push` HTTP path or any other service's sync handler.
+- Still Go: `PostingEngine.Handle` itself remains untested against a real
+  Postgres — the same deferral from Phase 2, not yet picked up here.

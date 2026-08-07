@@ -286,11 +286,21 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   runs all of it on every push/PR. Coverage is intentionally NOT
   comprehensive — most services' secondary controllers (agents, NCR,
   invoices/bills/journals, vehicles/maintenance/trips, employees/
-  attendance, customers, every `sync.service.ts`) have no tests yet, the
-  Flutter mobile app has none, and nothing anywhere tests against a real
-  database (every test mocks the Prisma transaction boundary, or for Go,
-  tests only DB-independent pure functions) — see `docs/RUNBOOK.md`'s "CI
-  + test suite" Phase 1 and Phase 2 sections.
+  attendance, customers, every `sync.service.ts`) have no tests yet, and
+  the Flutter mobile app has none. Phase 3 added real-Postgres integration
+  tests on procurement-service only (`test/*.integration-spec.ts`, a
+  separate `npm run test:integration` from the mocked unit suite): the
+  exact 3-scenario RLS cross-tenant-isolation proof this repo has only
+  ever verified by hand via `psql` since its first vertical slice, now
+  automated against a real `postgres:16-alpine` CI service container
+  running the actual migrations + seed files, plus real-SQL proof that
+  `createGoodsReceipt`'s over-receipt guard and idempotent replay and
+  `approvePurchaseOrder` actually persist correctly (Kafka and
+  governance-service's own HTTP check are still faked — this tests
+  procurement-service's own SQL, not those boundaries). Every other
+  service's tests, and the five approval-matrix scenarios proven by hand
+  with real Keycloak tokens, remain unautomated against a real database
+  — see `docs/RUNBOOK.md`'s "CI + test suite" Phase 1 through 3 sections.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.

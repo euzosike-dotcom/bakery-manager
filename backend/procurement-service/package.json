@@ -13,7 +13,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "lint": "eslint \"{src,test}/**/*.ts\"",
-    "test": "jest"
+    "test": "jest",
+    "test:integration": "jest --config jest-integration.config.js"
   },
   "dependencies": {
     "@metrock/backend-common": "file:../../packages/backend-common",

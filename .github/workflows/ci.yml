@@ -82,3 +82,79 @@ jobs:
       - name: Test
         working-directory: backend/ledger-service
         run: go test ./...
+
+  # Phase 3 of the CI + test suite plan: real Postgres, not a mock. Runs the
+  # SAME migrations + seed files infra/postgres/migrations and .../seed use
+  # locally (docs/RUNBOOK.md "2. Run migrations + seed data") against a
+  # throwaway service-container database, then tests procurement-service
+  # against it as the real least-privilege procurement_svc role — proving
+  # RLS cross-tenant isolation and real SQL correctness, neither of which
+  # the fully-mocked Phase 1/2 unit suites can catch.
+  procurement-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: metrock
+          POSTGRES_PASSWORD: metrock_dev_password
+          POSTGRES_DB: metrock_erp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGPASSWORD: metrock_dev_password
+      DATABASE_URL: postgresql://procurement_svc:procurement_svc_dev_password@localhost:5432/metrock_erp?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run migrations
+        run: |
+          set -e
+          for f in infra/postgres/migrations/*.sql; do
+            psql -h localhost -U metrock -d metrock_erp -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run seed data
+        run: |
+          set -e
+          # dev_seed.sql MUST run first — it creates the tenant_registry
+          # row + roles/plants every other seed file's foreign keys depend
+          # on. A plain alphabetically-globbed loop runs crm_seed.sql
+          # before dev_seed.sql and silently drops its INSERT (found while
+          # verifying this exact CI step: psql does not fail the shell on
+          # a SQL error by default, so the loop reported success while
+          # `customers` stayed empty — -v ON_ERROR_STOP=1 turns that class
+          # of bug into a real CI failure instead of quietly incomplete
+          # seed data).
+          psql -h localhost -U metrock -d metrock_erp -v ON_ERROR_STOP=1 -f infra/postgres/seed/dev_seed.sql
+          for f in infra/postgres/seed/*.sql; do
+            [ "$f" = "infra/postgres/seed/dev_seed.sql" ] && continue
+            psql -h localhost -U metrock -d metrock_erp -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Build @metrock/backend-common
+        working-directory: packages/backend-common
+        run: |
+          npm install
+          npm run build
+
+      - name: Install procurement-service dependencies
+        working-directory: backend/procurement-service
+        run: npm install
+
+      - name: Generate Prisma client
+        working-directory: backend/procurement-service
+        run: npx prisma generate
+
+      - name: Run integration tests
+        working-directory: backend/procurement-service
+        run: npm run test:integration -- --ci
