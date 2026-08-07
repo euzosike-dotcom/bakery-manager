@@ -269,38 +269,44 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   Accounting, and Fleet have no amount-routed approval flow yet, only the
   binary posting-authority gate above. See `docs/RUNBOOK.md`'s
   "Approval-matrix enforcement" section for the full verification trail.
-- **Automated test coverage exists for all 8 Node services + the Go
-  `ledger-service`'s pure logic, but is uneven and mocks the database
-  everywhere** — every module was previously verified exclusively by hand
-  (curl, psql, re-run at the end of each phase); Phases 1-2 of a 4-phase
-  plan added real Jest unit tests (62 tests) targeting each service's
-  single riskiest piece of business logic — governance-service's
+- **Automated test coverage now spans every part of the platform — all 8
+  Node services, the Go `ledger-service`'s pure logic, procurement-service
+  against a real Postgres, and the Flutter mobile app — but is uneven by
+  design and still mostly mocks the database.** Every module was
+  previously verified exclusively by hand (curl, psql, re-run at the end
+  of each phase); a 4-phase CI + test suite plan is now complete. Phases
+  1-2 added 62 Jest unit tests across all 8 NestJS services targeting each
+  one's single riskiest piece of business logic (governance-service's
   authority/approval checks and hash-chained audit log, procurement's
   over-receipt guard and PO approve/reject, manufacturing's yield formula,
-  sales' capital gate, accounting's report arithmetic, fleet's fuel-variance
-  tolerance, HR's revenue-based payroll calculation, and a regression test
-  for a real historical BigInt-serialization bug in CRM — plus 5 Go
-  sub-tests for `ledger-service`'s pure `amountFromPayload`/`nullableUUID`
-  helpers (not `PostingEngine.Handle` itself, which needs a real Postgres).
-  A GitHub Actions matrix workflow (`.github/workflows/ci.yml`) builds and
-  runs all of it on every push/PR. Coverage is intentionally NOT
-  comprehensive — most services' secondary controllers (agents, NCR,
-  invoices/bills/journals, vehicles/maintenance/trips, employees/
-  attendance, customers, every `sync.service.ts`) have no tests yet, and
-  the Flutter mobile app has none. Phase 3 added real-Postgres integration
-  tests on procurement-service only (`test/*.integration-spec.ts`, a
-  separate `npm run test:integration` from the mocked unit suite): the
-  exact 3-scenario RLS cross-tenant-isolation proof this repo has only
-  ever verified by hand via `psql` since its first vertical slice, now
-  automated against a real `postgres:16-alpine` CI service container
-  running the actual migrations + seed files, plus real-SQL proof that
-  `createGoodsReceipt`'s over-receipt guard and idempotent replay and
-  `approvePurchaseOrder` actually persist correctly (Kafka and
-  governance-service's own HTTP check are still faked — this tests
-  procurement-service's own SQL, not those boundaries). Every other
-  service's tests, and the five approval-matrix scenarios proven by hand
-  with real Keycloak tokens, remain unautomated against a real database
-  — see `docs/RUNBOOK.md`'s "CI + test suite" Phase 1 through 3 sections.
+  sales' capital gate, accounting's report arithmetic, fleet's
+  fuel-variance tolerance, HR's revenue-based payroll calculation, a
+  regression test for a real historical BigInt-serialization bug in CRM)
+  plus 5 Go sub-tests for `ledger-service`'s pure
+  `amountFromPayload`/`nullableUUID` helpers. Phase 3 added
+  `test/*.integration-spec.ts` on procurement-service against a real
+  `postgres:16-alpine` CI service container running the actual migrations
+  + seed files: the exact 3-scenario RLS cross-tenant-isolation proof this
+  repo had only ever verified by hand via `psql` since its first vertical
+  slice, now automated, plus real-SQL proof (not mocked) that the
+  over-receipt guard, idempotent replay, and PO approval actually persist
+  correctly. Phase 4 added Flutter tests: `AuthClient`'s PKCE
+  login/refresh/logout flow and secure-storage round-trip against
+  `mocktail` fakes, and `GoodsReceiptRepository`'s offline outbox-event
+  write path against a real in-memory sqlite database (not mocked —
+  `AppDatabase` gained an optional `QueryExecutor` constructor param
+  purely for this). A GitHub Actions workflow (`.github/workflows/ci.yml`
+  — a matrix over the 8 Node services, plus separate Go, Postgres-backed
+  integration, and Flutter jobs) builds and runs all of it on every
+  push/PR. What's still NOT covered, deliberately: most services'
+  secondary controllers (agents, NCR, invoices/bills/journals,
+  vehicles/maintenance/trips, employees/attendance, customers, every
+  `sync.service.ts`) and their Flutter repository counterparts; only
+  procurement-service has real-database integration tests; nothing
+  anywhere exercises the actual HTTP + Keycloak layer end-to-end
+  automatically — the five approval-matrix scenarios remain a proven-by-
+  hand curl verification, not a CI-enforced one. See `docs/RUNBOOK.md`'s
+  "CI + test suite" Phase 1 through 4 sections for the full trail.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.

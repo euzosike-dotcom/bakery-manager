@@ -158,3 +158,39 @@ jobs:
       - name: Run integration tests
         working-directory: backend/procurement-service
         run: npm run test:integration -- --ci
+
+  # Phase 4 of the CI + test suite plan: the Flutter mobile app. Two files
+  # under test/ — auth_client_test.dart (the PKCE login/refresh/logout flow
+  # and the secure-storage round-trip, mocktail fakes for FlutterAppAuth/
+  # FlutterSecureStorage, both already constructor-injectable) and
+  # goods_receipt_repository_test.dart (the offline outbox-event write path,
+  # against a real in-memory sqlite database via AppDatabase's new optional
+  # QueryExecutor constructor param — not a mock, same "real where it's
+  # cheap" reasoning as Phase 3's Postgres tests). `flutter analyze` runs
+  # first since neither `flutter test` nor `flutter build` catch every
+  # static issue on their own.
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+
+      - name: Install dependencies
+        working-directory: apps/mobile
+        run: flutter pub get
+
+      - name: Generate Drift code
+        working-directory: apps/mobile
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Analyze
+        working-directory: apps/mobile
+        run: flutter analyze
+
+      - name: Test
+        working-directory: apps/mobile
+        run: flutter test

@@ -31,7 +31,12 @@ part 'database.g.dart';
   SyncCursors,
 ])
 class AppDatabase extends _$AppDatabase {
-  AppDatabase() : super(_openConnection());
+  // Optional executor purely for tests (e.g. `NativeDatabase.memory()`) —
+  // `path_provider`'s platform channel isn't available under plain `flutter
+  // test`, so the real `_openConnection()` can't run there at all. Same
+  // constructor-injection pattern AuthClient already uses for its own
+  // otherwise-unmockable dependencies.
+  AppDatabase([QueryExecutor? executor]) : super(executor ?? _openConnection());
 
   @override
   int get schemaVersion => 6;

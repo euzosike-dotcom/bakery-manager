@@ -2752,3 +2752,95 @@ Postgres container were confirmed unaffected throughout.
   not for the `/sync/push` HTTP path or any other service's sync handler.
 - Still Go: `PostingEngine.Handle` itself remains untested against a real
   Postgres — the same deferral from Phase 2, not yet picked up here.
+
+## CI + test suite, Phase 4: the Flutter mobile app (plan complete)
+
+The last phase of the 4-phase plan. Two files under `apps/mobile/test/`,
+alongside the one real test that already existed there
+(`widget_test.dart`'s `PoLineDraft` unit test — this app was never
+entirely untested, just untested outside that one file).
+
+### 1. `auth_client_test.dart` — the PKCE login/refresh/logout flow, mocktail fakes
+
+`AuthClient` (Phase 3 of the Keycloak retrofit) already took both its
+collaborators — `FlutterAppAuth`, `FlutterSecureStorage` — via optional
+constructor injection, the same testability pattern this whole CI project
+has leaned on since governance-service's `PrismaService.forTenant` mocks.
+Added `mocktail` as a dev dependency (no code generation, unlike
+`mockito`) and wrote `MockFlutterAppAuth`/`MockFlutterSecureStorage`.
+
+Eight tests: `restoreSession` with and without a persisted session;
+`login` persisting all four tokens from a successful PKCE exchange;
+`getValidAccessToken` returning the current token without refreshing when
+it's still valid (asserted via `verifyNever`, not just a returned value);
+silently refreshing when within 30 seconds of expiry; and the two
+divergent failure paths the class's own doc comment calls out as the
+whole point of this method existing — an `invalid_grant` refresh failure
+logs the user out and throws, while a plain network failure during
+refresh REthrows without logging out, because going offline must never
+be indistinguishable from being signed out. `logout` clearing the local
+session even when the server-side end-session call itself fails.
+
+### 2. `goods_receipt_repository_test.dart` — outbox-event creation, a real database
+
+`captureGoodsReceipt` is the offline-capture write path (SDD §2.1): never
+touches the network, only the local Drift/sqlite cache. Run against a
+REAL in-memory sqlite database (`NativeDatabase.memory()`), not a mock —
+same "real where it's cheap" reasoning as Phase 3's Postgres tests, and
+cheap here too: `AppDatabase`'s constructor gained an optional
+`QueryExecutor` parameter purely for this (the real `_openConnection()`
+needs `path_provider`'s platform channel, unavailable under plain
+`flutter test`).
+
+Three tests: a capture commits the GRN row, both its lines, and EXACTLY
+ONE `PENDING` outbox event in one local transaction — asserting the
+outbox row's `client_event_id` is literally the same value as the GRN's
+own (the outbox idempotency key IS the entity's own client event id, not
+a separate one), and that the JSON payload decodes to the right shape;
+two captures produce two fully independent GRNs and outbox rows; omitting
+`receiverUserId` leaves the key OUT of the payload entirely rather than
+serializing it as `null` (asserted via `containsKey`, not just checking
+the value).
+
+### 3. `.github/workflows/ci.yml` gains a `mobile` job
+
+`subosito/flutter-action@v2` pinned to `3.44.8` (the version this session
+verified locally), `flutter pub get`, then `dart run build_runner build
+--delete-conflicting-outputs` — `database.g.dart` is gitignored
+(`apps/mobile/**/*.g.dart`), so a fresh CI checkout has to regenerate it,
+same shape as `packages/backend-common`'s gitignored `dist/` needing a
+build step in every other job. `flutter analyze` runs before `flutter
+test`, since neither `test` nor `build` alone catches every static issue.
+
+Verified the whole job locally from a genuinely clean state — deleted
+`.dart_tool` and `build`, then `pub get` → `build_runner` → `analyze` →
+`test`, all green — before trusting the YAML, same rigor as every prior
+phase's clean-slate check.
+
+### Known gaps after this pass (the 4-phase plan is now complete)
+
+- No widget-level tests anywhere — both new test files exercise
+  service/repository classes directly, never a rendered widget tree.
+  `main.dart`'s own root widget hits sqlite/network in `initState`, which
+  the original `widget_test.dart` comment already flagged as needing real
+  mocking infrastructure to test meaningfully — still true.
+- `SyncService` itself (the push/pull orchestration, connectivity
+  watching, retry-on-failure grouping) has no tests — only the
+  `GoodsReceiptRepository` write path that feeds its outbox queue.
+- Every other feature's repository (`ProductionBatchRepository`,
+  `SalesOrderRepository`, `NcrRepository`, `ActivityRepository`,
+  `TripLogRepository`, `FuelRecordRepository`, `AttendanceRepository`, if
+  each has its own like `GoodsReceiptRepository` does) is untested —
+  `goods_receipt_repository_test.dart` proves the PATTERN works, not that
+  every capture screen's own outbox-event shape is correct.
+- Stepping back to the whole plan: only procurement-service has real-
+  database integration tests (Phase 3); most services' secondary
+  controllers across the whole backend still have zero tests (Phase 2's
+  own "Known gaps"); nothing anywhere exercises the actual HTTP + Keycloak
+  layer end-to-end in an automated way — the five approval-matrix
+  scenarios and the Flutter app's real device/simulator verification both
+  remain manual proofs, not CI-enforced ones. Real, deliberate coverage
+  of the highest-value logic per surface, not comprehensive coverage —
+  the CI + test suite plan closes the "nothing regresses automatically"
+  gap for the riskiest logic, it does not eliminate manual verification
+  from this project.
