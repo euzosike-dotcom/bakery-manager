@@ -307,6 +307,27 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   automatically — the five approval-matrix scenarios remain a proven-by-
   hand curl verification, not a CI-enforced one. See `docs/RUNBOOK.md`'s
   "CI + test suite" Phase 1 through 4 sections for the full trail.
+- **All committed credentials are local-dev-only, and there's no real
+  secrets story for anything beyond that** — `infra/docker-compose.yml`'s
+  three passwords (Postgres, MinIO, Keycloak admin) are now overridable
+  via a gitignored `infra/.env` (`infra/.env.example` documents this;
+  `docker compose` reads it automatically from that directory), but the
+  DEFAULTS are still the exact same well-known values as before
+  (`metrock_dev_password`, `admin`) — this change makes them override-
+  able, it does not rotate or hide them, since they're not real secrets
+  to begin with. The 8 `*_svc_dev_password` values `infra/postgres/
+  migrations/*_role.sql` bakes into `CREATE ROLE ... PASSWORD` are
+  deliberately NOT parameterized the same way — every service's own
+  `.env.example` already hardcodes the matching value, so templating the
+  SQL would just relocate the same fixed-and-known password into a
+  different file, not reduce anything. None of this is fit for any
+  deployment reachable by anyone but the developer running it locally —
+  a real deployment needs an out-of-band, secrets-manager-driven
+  provisioning step (Vault, AWS Secrets Manager, Doppler, or similar)
+  that generates real per-environment credentials and injects them
+  without ever writing them to a file in this repo. That doesn't exist
+  here, on purpose — same "known, not solved" treatment as the missing
+  machine-to-machine auth above.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.

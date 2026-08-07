@@ -5,8 +5,8 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: metrock
-      POSTGRES_PASSWORD: metrock_dev_password
+      POSTGRES_USER: ${POSTGRES_USER:-metrock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-metrock_dev_password}
       POSTGRES_DB: metrock_erp
     ports:
       - "5432:5432"
@@ -57,8 +57,8 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: metrock
-      MINIO_ROOT_PASSWORD: metrock_dev_password
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-metrock}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-metrock_dev_password}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -66,8 +66,10 @@ services:
       - ./.miniodata:/data
 
   # Replaces TenantContextMiddleware's stub-header auth (SDD §1.2) —
-  # started as dev-mode (start-dev), admin/admin credentials, NOT
-  # production config. --import-realm loads realm-export.json on every
+  # started as dev-mode (start-dev), admin/admin credentials by default
+  # (override via infra/.env, see infra/.env.example — never committed as
+  # anything but this well-known local-dev default). NOT production
+  # config. --import-realm loads realm-export.json on every
   # boot; re-importing an already-existing realm is a Keycloak no-op, so
   # this is safe to restart repeatedly. See infra/keycloak/seed-users.sh
   # for the companion script that creates a Keycloak user per existing
@@ -77,8 +79,8 @@ services:
     restart: unless-stopped
     command: start-dev --import-realm
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
     ports:
       - "8080:8080"
     volumes:

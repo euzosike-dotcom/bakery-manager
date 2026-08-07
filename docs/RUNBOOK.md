@@ -35,6 +35,14 @@ docker compose up -d
 Starts Postgres (`localhost:5432`), Redpanda/Kafka (`localhost:9092`),
 Redis (`localhost:6379`), MinIO (`localhost:9000`, console `:9001`).
 
+Postgres/MinIO/Keycloak-admin credentials default to well-known local-dev
+values (`metrock_dev_password`, `admin`) baked into `docker-compose.yml` —
+fine as-is for local use, since this stack isn't reachable from anywhere
+but `localhost`. To override them (still never for a real deployment, see
+README "Known gaps"), copy `infra/.env.example` to `infra/.env` —
+`docker compose` reads a `.env` file from this same directory
+automatically, no extra flag needed.
+
 **Bug #1 found here — Redpanda advertised-listener mismatch.** Redpanda's
 compose config originally advertised itself as `redpanda:9092` (its
 in-network Docker Compose hostname). A Kafka client connects to the
