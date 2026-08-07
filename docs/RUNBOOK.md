@@ -33,7 +33,9 @@ docker compose up -d
 ```
 
 Starts Postgres (`localhost:5432`), Redpanda/Kafka (`localhost:9092`),
-Redis (`localhost:6379`), MinIO (`localhost:9000`, console `:9001`).
+Redis (`localhost:6379`), MinIO (`localhost:9000`, console `:9001`), and
+the nginx API Gateway (`localhost:8000` — see "API Gateway" section below;
+the 8 backend services themselves still run on the host, not in compose).
 
 Postgres/MinIO/Keycloak-admin credentials default to well-known local-dev
 values (`metrock_dev_password`, `admin`) baked into `docker-compose.yml` —
@@ -2852,3 +2854,108 @@ phase's clean-slate check.
   the CI + test suite plan closes the "nothing regresses automatically"
   gap for the riskiest logic, it does not eliminate manual verification
   from this project.
+
+## API Gateway (nginx path-based reverse proxy)
+
+The "No API Gateway yet" line from README's Known Gaps, closed to the
+extent that's actually proportionate right now — see `infra/nginx/
+nginx.conf`'s own header comment for the full reasoning on what this
+deliberately is and is not. Short version: the SDD's full Edge layer
+(subdomain tenant resolution, per-tenant rate limiting, a separate Sync
+Gateway microservice) is infrastructure for a multi-tenant, multi-client
+platform this repo isn't yet — one tenant, one client. What was actually
+broken: `apps/mobile/lib/main.dart` hardcoded 7 separate `localhost:PORT`
+base URLs, one per module. This closes exactly that, nothing more.
+
+### 1. `infra/nginx/nginx.conf` + `infra/docker-compose.yml`'s new `gateway` service
+
+nginx, not a hand-rolled NestJS proxy — path-based routing is nginx's
+core competency, and every other piece of shared infra in this stack
+(Postgres, Keycloak, Redpanda) is already an off-the-shelf component, not
+custom-built. One `location` block per module (`/procurement/`,
+`/manufacturing/`, `/sales/`, `/crm/`, `/fleet/`, `/hr/`, `/governance/` —
+`accounting-service` excluded, no Flutter dependency), each proxying to
+`host.docker.internal:PORT` (the 8 services still run on the host, not
+containerized). A transparent proxy: no JWT verification, no tenant
+resolution, no rate limiting — every header, including `Authorization`,
+passes through untouched, and each backend service keeps verifying its
+own Bearer token exactly as before.
+
+**Two real bugs found while verifying this against real traffic, not
+theoretical ones:**
+
+- **IPv6 connection failures on the first request after every restart.**
+  Docker's embedded DNS (`127.0.0.11`) resolves `host.docker.internal` to
+  BOTH an IPv6 and an IPv4 address. A plain `proxy_pass
+  http://host.docker.internal:PORT` resolves that hostname once at config
+  load and round-robins across every address returned — including the
+  IPv6 one, which has no route from inside the container and fails with
+  "Network unreachable" (self-healing via nginx's automatic retry on the
+  next address, but a wasted connection attempt and a scary log line every
+  time). Fixed with `resolver 127.0.0.11 ipv6=off valid=30s;` plus a
+  variable in each `proxy_pass`, which forces per-request resolution
+  through that resolver instead of nginx's static startup-time lookup —
+  the only way to actually skip the IPv6 record rather than just
+  tolerating the failure. Verified fixed across 3 fresh `docker compose
+  restart gateway` cycles with zero IPv6 errors in the logs.
+- **Using a variable in `proxy_pass` silently stopped stripping the
+  location prefix.** The first working version of the IPv6 fix above made
+  every request 404 — a well-documented but easy-to-miss nginx behavior:
+  static `proxy_pass` with a literal URI automatically replaces the
+  matched `location` prefix with that URI, but switching to a variable
+  disables that rewriting entirely, so `/procurement/purchase-orders`
+  arrived at procurement-service as the literal, unmatched path
+  `/procurement/purchase-orders` instead of `/purchase-orders`. Fixed with
+  an explicit `rewrite ^/procurement/(.*)$ /$1 break;` before each
+  `proxy_pass`, doing by hand what static `proxy_pass` used to do
+  automatically.
+
+### 2. `apps/mobile/lib/main.dart`
+
+7 hardcoded `_devProcurementBaseUrl`-style constants collapsed into one
+`_devGatewayBaseUrl = 'http://localhost:8000'`; each `ApiClient` now gets
+`'$_devGatewayBaseUrl/<module>'` instead of its own port.
+`core/sync/sync_service.dart`'s client-side `SyncModule` routing table
+didn't need to change at all — it routes to an `ApiClient` instance, and
+only which URL that instance points at changed.
+
+### 3. Verification
+
+Real HTTP calls with real Keycloak-issued Bearer tokens, not just
+"the config parses":
+
+- Unauthenticated request through the gateway returns the same `401` as a
+  direct call to the service — proves it actually reached the real
+  service's own `KeycloakAuthMiddleware`, not a gateway stub.
+- An authenticated `GET /procurement/purchase-orders` through the gateway
+  returns byte-identical data (same `po_id` set) to the same call made
+  directly to `procurement-service:3001` — proves the Bearer token and
+  full response body pass through unmodified.
+- All 7 routed module prefixes reach their real backend service
+  (confirmed via nginx's own access log, not just HTTP status codes).
+- 3 fresh `docker compose restart gateway` cycles, each followed
+  immediately by an authenticated request, all clean — no IPv6 errors,
+  correct routing.
+- Full interactive proof on the iOS Simulator: real login via the actual
+  Keycloak PKCE browser flow (not a mocked one), then the Purchase Orders
+  list loads real data — including PO-2026-00001 through 00004 AND the
+  throwaway `PO-TEST-*` rows this session's own Phase 3 integration-test
+  verification created — entirely through `localhost:8000`, and a PO
+  detail screen (a second, different endpoint) loads correctly too.
+
+### Known gaps after this pass
+
+- accounting-service isn't routed — no client calls it yet, add a
+  `location /accounting/` block the same way as the others if that
+  changes.
+- The SDD's other Edge-layer component, a separate Sync Gateway service,
+  remains unimplemented — `/sync/push`/`/sync/pull` stay inside each
+  domain service, correctly so until sync logic genuinely needs
+  deduplication across services.
+- Still no tenant resolution, rate limiting, or auth at the gateway layer
+  — meaningful only once a second tenant or a real multi-client
+  deployment exists to justify them.
+- Not part of `.github/workflows/ci.yml` — this is a local dev-stack
+  convenience layer, not something the automated test suite exercises
+  (procurement-service's own CI integration tests still hit the service
+  directly on its own port, not through the gateway).

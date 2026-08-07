@@ -43,13 +43,13 @@ import 'features/attendance/data/attendance_repository.dart';
 const _devKeycloakIssuer = 'http://localhost:8080/realms/metrock';
 const _devKeycloakClientId = 'metrock-mobile';
 const _devKeycloakRedirectUrl = 'com.metrock.metrockMobile:/oauth2redirect';
-const _devProcurementBaseUrl = 'http://localhost:3001';
-const _devManufacturingBaseUrl = 'http://localhost:3002';
-const _devSalesBaseUrl = 'http://localhost:3003';
-const _devCrmBaseUrl = 'http://localhost:3005';
-const _devFleetBaseUrl = 'http://localhost:3006';
-const _devHrBaseUrl = 'http://localhost:3007';
-const _devGovernanceBaseUrl = 'http://localhost:3008';
+// One entry point through the nginx API Gateway (infra/nginx/nginx.conf,
+// infra/docker-compose.yml's `gateway` service) instead of 7 separate
+// hardcoded per-service ports — each ApiClient below gets a path-prefixed
+// base URL (e.g. $_devGatewayBaseUrl/procurement) instead of its own port.
+// A transparent proxy: the Bearer token and every other header pass
+// through untouched, so nothing about ApiClient/AuthClient itself changed.
+const _devGatewayBaseUrl = 'http://localhost:8000';
 const _devWarehouseId = '7840f37a-13eb-4779-aa16-84bf10f7d351'; // WH-PLT1-RM, see infra/postgres/seed/dev_seed.sql
 
 void main() {
@@ -90,13 +90,13 @@ class _MetrockAppState extends State<MetrockApp> {
       clientId: _devKeycloakClientId,
       redirectUrl: _devKeycloakRedirectUrl,
     );
-    _procurementApi = ApiClient(baseUrl: _devProcurementBaseUrl, deviceId: _deviceId, auth: _auth);
-    _manufacturingApi = ApiClient(baseUrl: _devManufacturingBaseUrl, deviceId: _deviceId, auth: _auth);
-    _salesApi = ApiClient(baseUrl: _devSalesBaseUrl, deviceId: _deviceId, auth: _auth);
-    _crmApi = ApiClient(baseUrl: _devCrmBaseUrl, deviceId: _deviceId, auth: _auth);
-    _fleetApi = ApiClient(baseUrl: _devFleetBaseUrl, deviceId: _deviceId, auth: _auth);
-    _hrApi = ApiClient(baseUrl: _devHrBaseUrl, deviceId: _deviceId, auth: _auth);
-    _governanceApi = ApiClient(baseUrl: _devGovernanceBaseUrl, deviceId: _deviceId, auth: _auth);
+    _procurementApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/procurement', deviceId: _deviceId, auth: _auth);
+    _manufacturingApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/manufacturing', deviceId: _deviceId, auth: _auth);
+    _salesApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/sales', deviceId: _deviceId, auth: _auth);
+    _crmApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/crm', deviceId: _deviceId, auth: _auth);
+    _fleetApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/fleet', deviceId: _deviceId, auth: _auth);
+    _hrApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/hr', deviceId: _deviceId, auth: _auth);
+    _governanceApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/governance', deviceId: _deviceId, auth: _auth);
     // Governance has no SyncModule entry at all — master data is
     // pull-only per SDD §3.A, never edited offline, so there's nothing
     // for the sync engine to push/pull for this module.

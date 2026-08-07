@@ -148,14 +148,25 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 - **Multi-tenancy isolation tiers**: only the "Pool" tier (shared schema +
   RLS) is implemented. Schema-per-tenant ("Bridge") and database-per-tenant
   ("Silo") provisioning are not built yet.
-- **No API Gateway yet**: the Flutter client talks to each domain service's
-  base URL directly (hardcoded per module in `main.dart`), and
-  `core/sync/sync_service.dart` routes outbox events to the right service
-  client-side (`SyncModule` enum + a small routing table). Fine at three
-  services, will not scale cleanly to six — a real API Gateway
-  consolidating tenant resolution and per-module routing (as the SDD's
-  architecture diagram already calls for) is the right next infrastructure
-  investment, not a fourth entry in the client-side routing table.
+- **API Gateway exists, but only as a transparent path-based reverse proxy —
+  not the SDD's full Edge layer.** `infra/nginx/nginx.conf` (a new `gateway`
+  service in `infra/docker-compose.yml`, `localhost:8000`) gives the
+  Flutter client ONE base URL instead of 7 hardcoded per-module ports
+  (`main.dart` now builds each `ApiClient` from `$gatewayBaseUrl/<module>`
+  instead of its own port) and routes by path prefix to the right backend
+  service. Deliberately NOT doing what the SDD's "API Gateway" component
+  also calls for: subdomain-based tenant resolution (no second tenant
+  exists to resolve against — this platform runs one tenant), per-tenant
+  rate limiting (nothing to differentiate tenants by yet), or any JWT
+  verification of its own (a transparent proxy; every backend service
+  still verifies its own Bearer token exactly as before — see
+  `nginx.conf`'s header comment for the full reasoning). The SDD's separate
+  "Sync Gateway" component (relocating `/sync/push`/`/sync/pull` out of
+  each domain service into one dedicated service) also remains
+  unimplemented — those endpoints are correctly placed inside each service
+  today and moving them would serve no one yet. `core/sync/sync_service.dart`
+  still routes outbox events client-side via the `SyncModule` enum — that
+  logic didn't need to change, only which URL each `ApiClient` points at.
 - **No SKU catalog / pricing endpoint**: the Sales module's order capture
   hardcodes one finished-good SKU and lets the user type any unit price —
   no product-listing or price-list endpoint exists yet on any service.
