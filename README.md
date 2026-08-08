@@ -339,6 +339,21 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   without ever writing them to a file in this repo. That doesn't exist
   here, on purpose — same "known, not solved" treatment as the missing
   machine-to-machine auth above.
+- **`helmet` security headers on by default; CORS opt-in and unused so
+  far.** `@metrock/backend-common`'s `applySecurityMiddleware` (called
+  once per service from each `main.ts`, same shared-bootstrap pattern as
+  `ValidationPipe`) applies `helmet()`'s defaults across all 8 NestJS
+  services — real response headers (CSP, `X-Frame-Options`,
+  `X-Content-Type-Options`, etc.), not just present in the code.
+  CORS is gated behind an optional `CORS_ALLOWED_ORIGINS` env var
+  (comma-separated, never a bare wildcard) precisely because it isn't an
+  active gap today — a browser enforces same-origin with zero server
+  config, and nothing today calls these APIs from a browser (only the
+  native Flutter app + curl, neither subject to CORS). Left unset on
+  every service, which changes nothing from before this pass; ready for
+  whenever the SDD's Web Console client actually exists. Still no rate
+  limiting anywhere, including at the new API Gateway — a real gap, not
+  yet addressed.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.

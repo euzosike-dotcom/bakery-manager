@@ -2959,3 +2959,79 @@ Real HTTP calls with real Keycloak-issued Bearer tokens, not just
   convenience layer, not something the automated test suite exercises
   (procurement-service's own CI integration tests still hit the service
   directly on its own port, not through the gateway).
+
+## `helmet` security headers + opt-in CORS
+
+All 8 `main.ts` files were byte-identical boilerplate around this
+concern (same as `ValidationPipe` before it), confirmed by diffing all 8
+before touching any of them — so the fix lives once in
+`@metrock/backend-common`, not 8 times.
+
+### 1. `packages/backend-common/src/security-middleware.ts`
+
+One new export, `applySecurityMiddleware(app)`, called from each
+service's `main.ts` right after `NestFactory.create(AppModule)`, same
+place `ValidationPipe` was already wired up. Two genuinely different
+gaps, addressed differently — see the function's own doc comment for the
+full reasoning:
+
+- `helmet()` with its defaults — an ACTIVE gap, always on. These are
+  pure JSON APIs with no server-rendered views, so no per-service CSP
+  tuning was needed.
+- CORS gated behind a new `CORS_ALLOWED_ORIGINS` env var (comma-
+  separated). NOT an active gap today — a browser enforces same-origin
+  with zero server config, and nothing today calls these APIs from a
+  browser (only the native Flutter app + curl, neither subject to CORS).
+  Left unset on every service (each `.env.example` documents it,
+  commented out), which is exactly today's behavior — this makes the
+  capability ready for the SDD's Web Console client without changing
+  anything before it exists, and ensures whoever adds it later reaches
+  for an explicit allow-list instead of a bare `app.enableCors()` (which
+  permits every origin).
+
+`helmet` added as a real dependency of `packages/backend-common`
+(alongside `jsonwebtoken`/`jwks-rsa`, the same pattern), not a peer
+dependency — it's used directly inside the shared function, not just
+referenced by type.
+
+### 2. Rolling it out to all 8 services
+
+Same propagation gotcha this session has hit before with
+`packages/backend-common` changes, but sharper this time: a partial
+`rm -rf node_modules/@metrock/backend-common && npm install` picked up
+the new export's *code* but silently skipped `helmet` itself — the
+existing `package-lock.json` didn't know backend-common's own
+`package.json` had gained a new dependency, so npm reinstalled the
+stale locked tree rather than resolving it fresh. Confirmed missing via
+`find node_modules -iname helmet` coming up empty even though the build
+succeeded (TypeScript only checks types, not runtime `node_modules`
+presence). Fixed by doing a full `rm -rf node_modules package-lock.json
+&& npm install` per service instead of the partial version — the
+reliable one, not the fast one.
+
+### 3. Verification — real headers on real responses, not just "it compiles"
+
+- Restarted all 8 dev services, confirmed all healthy.
+- `curl -I` against a real running service shows the actual headers:
+  `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: SAMEORIGIN`, `Strict-Transport-Security`, and more —
+  checked on all 8 ports, not just one.
+- Confirmed CORS stays OFF by default: a request with an `Origin` header
+  and no `CORS_ALLOWED_ORIGINS` set gets no `Access-Control-Allow-Origin`
+  header back, exactly today's behavior.
+- Confirmed the opt-in path actually works when enabled: restarted
+  procurement-service with `CORS_ALLOWED_ORIGINS` set to one origin,
+  confirmed the header appears for that exact origin and stays absent
+  for a different one. First attempt at this specific check gave a false
+  negative — chased down to a stale process from an earlier restart in
+  this session still squatting on port 3001 under a different process
+  name (`node dist/src/main`, not matched by a `pkill -f
+  ".../node_modules/.bin/nest"` pattern), so the new instance with the
+  env var set had actually crashed on `EADDRINUSE` and never took the
+  request at all. Found via `lsof -i :3001 -sTCP:LISTEN -t` plus `ps eww
+  -p $PID` to inspect the actual running process's environment directly,
+  not by trusting that "I started a process" meant "that process is the
+  one answering." Killed the correct PID, reran, confirmed clean.
+- All 8 services' existing Jest suites (Phases 1-3) still pass — the new
+  middleware sits ahead of everything else in the request pipeline but
+  changes no business logic.
