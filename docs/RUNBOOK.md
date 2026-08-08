@@ -3035,3 +3035,79 @@ reliable one, not the fast one.
 - All 8 services' existing Jest suites (Phases 1-3) still pass — the new
   middleware sits ahead of everything else in the request pipeline but
   changes no business logic.
+
+## Rate limiting — two independent layers
+
+Flat, non-tenant-aware flood/DoS protection — NOT the SDD's per-tenant-
+tier rate limiting (§1.1's API Gateway responsibilities), which still
+doesn't apply: one tenant, nothing to tier by. Same "the mechanism
+doesn't need to wait for the prerequisite it's usually paired with"
+reasoning as CORS.
+
+### 1. `infra/nginx/nginx.conf` — gateway layer
+
+`limit_req_zone $binary_remote_addr zone=gateway_limit:10m rate=100r/m;`
+plus `limit_req zone=gateway_limit burst=20 nodelay;` in the `server`
+block, applying to every routed location at once. `limit_req_status 429;`
+so rejections return the correct status code (nginx defaults to `503`
+otherwise).
+
+### 2. `packages/backend-common/src/rate-limit.module.ts` — per-service layer
+
+A SEPARATE layer, not a duplicate of the gateway one: every service is
+still directly reachable on its own port (`:3001`–`:3008`), the same
+dev-convenience pattern this whole session's own manual curl verification
+has relied on throughout — gateway-only protection would leave that path
+completely open. `ThrottlerModule.forRoot()` (100 requests/60s per client
+IP) plus `ThrottlerGuard` registered as a global `APP_GUARD`, exported as
+one `RateLimitModule` and imported into all 8 `AppModule`s right after
+`ConfigModule.forRoot(...)` — same shared-bootstrap-once pattern as
+`applySecurityMiddleware`, just at the module level instead of `main.ts`
+since Nest Guards have to be wired through the DI system, not `app.use()`.
+`@nestjs/core` added as a new peer dependency of `packages/backend-common`
+(needed for `APP_GUARD`) — the same package every consuming service
+already has installed as the actual NestJS framework, so no new
+requirement in practice, just an explicit one.
+
+### 3. Verification — real `429`s under real load, both layers, plus a real methodology mistake caught along the way
+
+- **Gateway**: fired 150 rapid unauthenticated requests through
+  `localhost:8000/procurement/...` — 27 succeeded (burst allowance plus a
+  few admitted at the steady rate during the loop's real wall-clock
+  duration), 123 came back `429`. Confirmed recovery (not a hard block)
+  after a few seconds' pause.
+- **Per-service**: first attempt fired 150 unauthenticated requests
+  directly at `procurement-service:3001` and got 150×`401`, zero `429`s —
+  looked like the throttle wasn't working at all. Root cause:
+  `KeycloakAuthMiddleware` rejects unauthenticated requests inside Nest's
+  middleware phase, which runs BEFORE the Guard phase where
+  `ThrottlerGuard` lives — an unauthenticated flood never reaches the
+  throttler at all, it's already rejected by auth first. Redid the test
+  with a real Keycloak-issued Bearer token; the token's 2-second lifetime
+  (this realm's `metrock-test-client` setting, established earlier this
+  session) then cut a SEQUENTIAL 150-request loop short at 58 successes
+  before the token expired mid-test. Fixed by firing the same 150
+  requests with 30-way concurrency (`xargs -P 30`) so the whole burst
+  completed in under 400ms, comfortably inside the token's lifetime: 42
+  succeeded, 108 came back `429` — and 58 (the earlier sequential run) +
+  42 = exactly 100, confirming the IP-based 60-second counter had
+  correctly persisted across both separate test invocations from the same
+  source IP, not reset between them.
+- Confirmed normal single-request traffic on every OTHER service stayed
+  completely unaffected (still `401` for auth reasons, never `429`) — the
+  limit is per-service-instance, one flooded service doesn't touch the
+  others.
+- All 8 services' existing Jest suites still pass.
+
+### Known gaps after this pass
+
+- Limits (100 req/min at both layers) are generous, clearly-dev-
+  appropriate defaults, not real production SLA numbers — the SDD ties
+  those to a tenant tier that doesn't exist yet.
+- Both layers track by client IP, not by authenticated user/tenant —
+  correct for flat, non-tenant-aware flood protection, but means a shared
+  NAT/proxy in front of many real users would share one limit. Revisit
+  once there's a real tenant-tier concept to key by instead.
+- Not part of `.github/workflows/ci.yml` — same reasoning as the gateway
+  itself not being CI-exercised; this is dev-stack flood protection, not
+  something the automated test suite needs to prove on every push.

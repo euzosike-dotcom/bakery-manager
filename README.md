@@ -156,8 +156,9 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   instead of its own port) and routes by path prefix to the right backend
   service. Deliberately NOT doing what the SDD's "API Gateway" component
   also calls for: subdomain-based tenant resolution (no second tenant
-  exists to resolve against — this platform runs one tenant), per-tenant
-  rate limiting (nothing to differentiate tenants by yet), or any JWT
+  exists to resolve against — this platform runs one tenant), per-*tenant*
+  rate limiting (nothing to differentiate tenants by yet — see below for
+  the flat, non-tenant-aware flood protection that DOES exist), or any JWT
   verification of its own (a transparent proxy; every backend service
   still verifies its own Bearer token exactly as before — see
   `nginx.conf`'s header comment for the full reasoning). The SDD's separate
@@ -351,9 +352,22 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   config, and nothing today calls these APIs from a browser (only the
   native Flutter app + curl, neither subject to CORS). Left unset on
   every service, which changes nothing from before this pass; ready for
-  whenever the SDD's Web Console client actually exists. Still no rate
-  limiting anywhere, including at the new API Gateway — a real gap, not
-  yet addressed.
+  whenever the SDD's Web Console client actually exists.
+- **Flat, non-tenant-aware flood/DoS rate limiting exists at two
+  independent layers — NOT the SDD's per-tenant-tier rate limiting,
+  which still doesn't apply with one tenant in the system.** A gateway
+  layer (`infra/nginx/nginx.conf`'s `limit_req_zone`, keyed by client IP:
+  100 req/min with a 20-request burst, real `429`s confirmed under an
+  actual 150-request burst, not just config review) and an app layer
+  (`@metrock/backend-common`'s `RateLimitModule`, `@nestjs/throttler`
+  wired into all 8 services' `AppModule`s: 100 req/min per client IP,
+  also confirmed triggering real `429`s). Two layers because direct port
+  access (`:3001`–`:3008`) bypasses the gateway entirely — this whole
+  session's own manual verification has hit services directly on their
+  ports throughout, so gateway-only protection would leave that path
+  completely open. Limits are generous, clearly-dev-appropriate defaults,
+  not real production SLA numbers (which the SDD ties to a tenant tier
+  that doesn't exist yet).
 - **`npm audit` reports 23 vulnerabilities per service (3 low, 13
   moderate, 7 high) — but the actual exploitable surface is much smaller
   than that count suggests, and NOT force-fixed on purpose.** Every fix

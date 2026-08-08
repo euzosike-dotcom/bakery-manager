@@ -1,6 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { TenantContextMiddleware } from '@metrock/backend-common';
+import { TenantContextMiddleware, RateLimitModule } from '@metrock/backend-common';
 import { KeycloakAuthMiddleware } from './common/keycloak-auth.middleware';
 import { PrismaModule } from './common/prisma.module';
 import { TenantModule } from './tenant/tenant.module';
@@ -16,6 +16,7 @@ import { AuthorizationModule } from './authorization/authorization.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    RateLimitModule,
     PrismaModule,
     TenantModule,
     PlantsModule,

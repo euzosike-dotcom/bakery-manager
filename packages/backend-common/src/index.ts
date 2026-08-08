@@ -6,3 +6,4 @@ export * from './posting-authority.client';
 export * from './keycloak-auth';
 export * from './keycloak-auth.middleware';
 export * from './security-middleware';
+export * from './rate-limit.module';

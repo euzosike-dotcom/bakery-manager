@@ -1,6 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { KeycloakAuthMiddleware } from '@metrock/backend-common';
+import { KeycloakAuthMiddleware, RateLimitModule } from '@metrock/backend-common';
 import { PrismaModule } from './common/prisma.module';
 import { KafkaModule } from './common/kafka.module';
 import { GovernanceModule } from './common/governance.module';
@@ -12,6 +12,7 @@ import { SyncModule } from './sync/sync.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    RateLimitModule,
     PrismaModule,
     KafkaModule,
     GovernanceModule,
