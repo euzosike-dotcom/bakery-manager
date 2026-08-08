@@ -354,6 +354,38 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   whenever the SDD's Web Console client actually exists. Still no rate
   limiting anywhere, including at the new API Gateway — a real gap, not
   yet addressed.
+- **`npm audit` reports 23 vulnerabilities per service (3 low, 13
+  moderate, 7 high) — but the actual exploitable surface is much smaller
+  than that count suggests, and NOT force-fixed on purpose.** Every fix
+  path `npm audit` offers except one requires `--force`, and every one of
+  those forces the same thing: bumping `@nestjs/core` from 10.x to 11.x —
+  a framework major-version migration across all 8 services, not a
+  patch, with its own real regression risk against everything this
+  session has already built and verified. Breaking down what the count
+  actually contains:
+  - **Dev-tooling only, zero runtime exposure**: `ajv`, `glob`,
+    `picomatch`, `tmp`/`inquirer`/`external-editor`, `webpack` — all
+    pulled in transitively by `@nestjs/cli`'s build/scaffolding tooling,
+    never loaded by the deployed server process. Unreachable by anyone
+    calling the API, regardless of severity rating.
+  - **Present in `node_modules`, code path never invoked**: `multer` and
+    `file-type` ship bundled with `@nestjs/platform-express`/
+    `@nestjs/common`, but nothing in this codebase registers a
+    `FileInterceptor` or serves static files (confirmed by grep across
+    every service, not assumed) — the vulnerable functions are never
+    called.
+  - **Genuinely reachable**: the `qs`/`express`/`body-parser` DoS chain,
+    and `@nestjs/config`'s `lodash` prototype-pollution advisory
+    (`@nestjs/config` is a real runtime dependency of every service's
+    `AppModule`, though the vulnerable `lodash` functions are used
+    internally for config-merging, not exposed to raw request bodies).
+  - The ONE fix `npm audit fix` offers without `--force` is `file-type` —
+    the one entry whose vulnerable path isn't even reachable.
+
+  Net: real exposure is closer to "one DoS chain worth eventually
+  patching" than "23 vulnerabilities," but nothing here is patched — a
+  genuine NestJS 10→11 migration, verified with the same rigor as every
+  other change in this repo, is the honest fix and hasn't been scheduled.
 - **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
   an authorization bypass attempt is a structured log line, not an actual
   email/Slack/pager integration.
