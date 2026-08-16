@@ -368,6 +368,29 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   completely open. Limits are generous, clearly-dev-appropriate defaults,
   not real production SLA numbers (which the SDD ties to a tenant tier
   that doesn't exist yet).
+- **TLS termination exists at the two things the Flutter client actually
+  talks to directly — the nginx gateway and Keycloak — self-signed, and
+  the mobile app doesn't use it yet.** `infra/certs/generate-dev-certs.sh`
+  generates a gitignored, regenerable-per-machine self-signed cert
+  (`CN=localhost`, SANs `localhost`+`127.0.0.1`) — deliberately plain
+  `openssl`, not `mkcert`: `mkcert`'s nicer no-warning experience comes
+  from installing a local CA into the system trust store, a real change
+  to the machine itself that this repo doesn't make on your behalf. The
+  gateway gets a second listener (`:8443`, alongside the existing plain
+  `:8000` — not a replacement) and Keycloak gets `--https-certificate-file`
+  alongside its existing plain `:8080` (mapped to host `:8543` to avoid
+  colliding with the gateway's own `:8443`). Real TLS handshakes
+  confirmed via `openssl s_client` and a full authenticated round-trip
+  through `https://localhost:8443`, not just "the config parses." The
+  8 backend services themselves are NOT given TLS — they became internal-
+  only the moment the gateway existed, so nothing client-facing hits them
+  directly anymore. Postgres/Kafka/Redis/MinIO remain fully plaintext —
+  internal data-plane traffic, each with its own separate TLS mechanism
+  to configure, a distinctly bigger and lower-priority lift than the two
+  client-facing endpoints. Switching the Flutter app itself to `https://`
+  is a deliberately separate, still out-of-scope step — the iOS Simulator
+  needs to be taught to trust this self-signed cert first, its own real
+  piece of work, not bundled into this pass.
 - **`npm audit` reports 23 vulnerabilities per service (3 low, 13
   moderate, 7 high) — but the actual exploitable surface is much smaller
   than that count suggests, and NOT force-fixed on purpose.** Every fix

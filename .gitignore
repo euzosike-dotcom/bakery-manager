@@ -25,3 +25,7 @@ apps/mobile/**/*.drift.dart
 # Postgres data volume (docker-compose)
 infra/.pgdata/
 infra/.miniodata/
+
+# Self-signed dev TLS certs (infra/certs/generate-dev-certs.sh) — always
+# regenerable per-machine; never commit a private key even a throwaway one.
+infra/certs/*.pem

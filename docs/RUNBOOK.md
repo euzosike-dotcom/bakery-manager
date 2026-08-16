@@ -34,8 +34,12 @@ docker compose up -d
 
 Starts Postgres (`localhost:5432`), Redpanda/Kafka (`localhost:9092`),
 Redis (`localhost:6379`), MinIO (`localhost:9000`, console `:9001`), and
-the nginx API Gateway (`localhost:8000` — see "API Gateway" section below;
-the 8 backend services themselves still run on the host, not in compose).
+the nginx API Gateway (`localhost:8000` plain / `:8443` TLS — see "API
+Gateway" and "TLS termination" sections below; the 8 backend services
+themselves still run on the host, not in compose). Keycloak's own HTTPS
+listener is on `:8543`. Run `infra/certs/generate-dev-certs.sh` once
+before first use — nginx and Keycloak both fail to start without a cert
+present at `infra/certs/`.
 
 Postgres/MinIO/Keycloak-admin credentials default to well-known local-dev
 values (`metrock_dev_password`, `admin`) baked into `docker-compose.yml` —
@@ -3111,3 +3115,112 @@ requirement in practice, just an explicit one.
 - Not part of `.github/workflows/ci.yml` — same reasoning as the gateway
   itself not being CI-exercised; this is dev-stack flood protection, not
   something the automated test suite needs to prove on every push.
+
+## TLS termination (Part A — gateway + Keycloak, mobile app still on HTTP)
+
+Scoped deliberately narrow: TLS at the two things the Flutter client
+actually talks to directly (the nginx gateway, Keycloak), proven working
+with real handshakes — not the whole internal mesh, and not yet the
+mobile app itself. See the scoping conversation for why: the 8 backend
+services became internal-only the moment the gateway existed, so TLS in
+front of *them* specifically isn't the active gap the gateway/Keycloak
+are; Postgres/Kafka/Redis/MinIO are internal data-plane traffic, each
+with its own separate TLS mechanism, a distinctly bigger and lower-
+priority lift; and switching the mobile app to `https://` needs the iOS
+Simulator to trust a self-signed cert, its own real piece of work with
+its own verification story, not something to rush into the same pass.
+
+### 1. `infra/certs/generate-dev-certs.sh`
+
+Plain `openssl req -x509`, not `mkcert` — deliberately. `mkcert` gives a
+nicer no-browser-warning dev experience, but only because it installs a
+local CA into the machine's own system trust store, a real change to the
+host, not just this project. That's the kind of action this session
+checks with you about rather than doing quietly, so this generates a
+plain self-signed cert instead: `CN=localhost`, SANs `localhost` +
+`127.0.0.1`, 825 days validity. Output (`dev-cert.pem`, `dev-key.pem`)
+is gitignored — regenerable per-machine on demand, and a private key,
+even a throwaway dev one, shouldn't be committed regardless. Run it once
+before first use:
+
+```bash
+infra/certs/generate-dev-certs.sh
+```
+
+### 2. `infra/nginx/` — a second listener, not a replacement
+
+`nginx.conf` gained a `:8443 ssl` server block alongside the existing
+plain `:8000` one — both stay up. All 7 module `location` blocks were
+about to be duplicated across two server blocks for no reason (the
+routing logic doesn't depend on which listener a request arrived on), so
+they moved into a new `infra/nginx/locations.conf`, `include`d by both
+server blocks instead — the actual maintenance-friendly fix, not just
+"paste it twice." The rate-limiting zone from the previous pass
+(`limit_req_zone`, defined once at `http` level) is automatically shared
+across both listeners, no extra wiring needed.
+
+`docker-compose.yml`'s `gateway` service gained a `8443:8443` port
+mapping and a new `./certs:/etc/nginx/certs:ro` volume mount (plus the
+`locations.conf` mount, since it's a separate file now).
+
+### 3. Keycloak — additive, not a switch
+
+`--https-certificate-file`/`--https-certificate-key-file` added to the
+existing `start-dev --import-realm` command, same cert as the gateway.
+This does NOT change the realm's canonical issuer URL — every service's
+`KEYCLOAK_ISSUER` and `realm-export.json` itself still say
+`http://localhost:8080/realms/metrock`, unmodified. Keycloak's own
+default HTTPS port (`8443`, container-internal) would collide with the
+gateway's own `8443` host mapping if mapped straight through, so
+`docker-compose.yml` maps it to host port `8543` instead — two separate
+containers, two separate host ports, container-internal config
+untouched.
+
+### 4. A real gap this surfaced, unrelated to TLS itself
+
+Verifying this required restarting the whole stack, which revealed
+Docker Desktop's VM (and, separately, all 8 host-run Node services) had
+been down entirely — a long system sleep/wake cycle, not anything this
+pass changed. Bringing everything back up also revealed that
+`chidinma.eze@metrock.dev`/`tunde.bakare@metrock.dev` (created ad hoc via
+`infra/keycloak/seed-users.sh` earlier this session, not part of the
+committed `realm-export.json`) don't survive a Keycloak realm re-import —
+`--import-realm`'s `OVERWRITE_EXISTING` strategy replaces the whole
+realm from the file on every fresh start, and those two users only ever
+existed as live Keycloak Admin API calls, never in the file itself.
+Re-running `infra/keycloak/seed-users.sh` recreated them (idempotent,
+matches existing Postgres `users` rows by `local_user_id`) — but this is
+a real, standing operational gap worth naming: after any full Keycloak
+restart, `seed-users.sh` needs re-running for every user beyond what's
+baked into `realm-export.json`, and nothing currently automates or
+even flags that step.
+
+### 5. Verification — real handshakes, not config review
+
+- `openssl s_client -connect localhost:8443` and `...:8543`, both
+  returning the same self-signed cert with the expected `CN=localhost`
+  and validity dates — the handshake actually completes.
+- `curl -sk https://localhost:8543/realms/metrock/.well-known/openid-configuration`
+  — real `200` with a genuine OIDC discovery document from Keycloak's
+  HTTPS listener.
+- A full authenticated round-trip through the gateway's HTTPS listener —
+  real Keycloak token, `https://localhost:8443/procurement/purchase-orders`
+  — returning real data, not just a handshake.
+- Confirmed the plain `:8000`/`:8080` listeners still work unmodified
+  (this is additive, not a cutover) and spot-checked 3 more module
+  routes through `:8443` to confirm the shared `locations.conf` include
+  actually applies to all of them, not just the one tested first.
+
+### Known gaps after this pass
+
+- The Flutter app still points at `http://localhost:8000` and
+  `http://localhost:8080` — Part B (switching it to HTTPS) needs the iOS
+  Simulator taught to trust this self-signed cert, deliberately not
+  attempted here.
+- The 8 backend services, Postgres, Kafka, Redis, and MinIO remain fully
+  plaintext.
+- No automated reminder that `seed-users.sh` needs re-running after a
+  Keycloak realm reset — found and worked around this pass, not fixed.
+- Not part of `.github/workflows/ci.yml` — same reasoning as the gateway
+  and rate-limiting passes before it; this is dev-stack infrastructure,
+  not something the automated test suite exercises.
