@@ -26,4 +26,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
 
 chmod 600 "$CERT_DIR/dev-key.pem"
 
+# Also copy the cert (never the key) into the Flutter app as a bundled
+# asset — TLS termination Part B (docs/RUNBOOK.md) pins ApiClient's
+# SecurityContext to exactly this cert instead of trusting the system
+# store. Gitignored the same way as infra/certs/*.pem; regenerate/copy
+# again any time this script re-runs.
+MOBILE_CERT_DIR="$CERT_DIR/../../apps/mobile/assets/certs"
+mkdir -p "$MOBILE_CERT_DIR"
+cp "$CERT_DIR/dev-cert.pem" "$MOBILE_CERT_DIR/dev-cert.pem"
+
 echo "Generated $CERT_DIR/dev-cert.pem and $CERT_DIR/dev-key.pem (valid 825 days, localhost + 127.0.0.1 only)."
+echo "Copied dev-cert.pem into $MOBILE_CERT_DIR (bundled Flutter asset)."

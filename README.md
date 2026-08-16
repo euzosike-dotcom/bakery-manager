@@ -370,7 +370,8 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   that doesn't exist yet).
 - **TLS termination exists at the two things the Flutter client actually
   talks to directly — the nginx gateway and Keycloak — self-signed, and
-  the mobile app doesn't use it yet.** `infra/certs/generate-dev-certs.sh`
+  the mobile app now uses it end-to-end, including the native login
+  flow.** `infra/certs/generate-dev-certs.sh`
   generates a gitignored, regenerable-per-machine self-signed cert
   (`CN=localhost`, SANs `localhost`+`127.0.0.1`) — deliberately plain
   `openssl`, not `mkcert`: `mkcert`'s nicer no-warning experience comes
@@ -382,15 +383,22 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   colliding with the gateway's own `:8443`). Real TLS handshakes
   confirmed via `openssl s_client` and a full authenticated round-trip
   through `https://localhost:8443`, not just "the config parses." The
-  8 backend services themselves are NOT given TLS — they became internal-
+  8 backend services themselves don't serve TLS — they became internal-
   only the moment the gateway existed, so nothing client-facing hits them
   directly anymore. Postgres/Kafka/Redis/MinIO remain fully plaintext —
   internal data-plane traffic, each with its own separate TLS mechanism
   to configure, a distinctly bigger and lower-priority lift than the two
-  client-facing endpoints. Switching the Flutter app itself to `https://`
-  is a deliberately separate, still out-of-scope step — the iOS Simulator
-  needs to be taught to trust this self-signed cert first, its own real
-  piece of work, not bundled into this pass.
+  client-facing endpoints. The Flutter app now speaks HTTPS to both: a
+  pinned Dart `SecurityContext` for `ApiClient`'s data calls, and the
+  iOS Simulator's own keychain trusting the dev cert (`xcrun simctl
+  keychain ... add-root-cert`, a one-time per-simulator step) for
+  `AuthClient`'s native `ASWebAuthenticationSession` login flow, which
+  Dart-level TLS config can't reach at all. Moving the login endpoint to
+  HTTPS also changes what's stamped into every issued token's `iss`
+  claim, so all 8 backend services' `KEYCLOAK_ISSUER` and
+  `NODE_EXTRA_CA_CERTS` (for their own JWKS fetch) had to move with it —
+  see docs/RUNBOOK.md's "TLS termination (Part B)" for why that
+  couldn't be avoided by pinning Keycloak's issuer instead.
 - **`npm audit` reports 23 vulnerabilities per service (3 low, 13
   moderate, 7 high) — but the actual exploitable surface is much smaller
   than that count suggests, and NOT force-fixed on purpose.** Every fix

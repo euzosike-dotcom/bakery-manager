@@ -88,6 +88,7 @@
       "attributes": {
         "pkce.code.challenge.method": "S256"
       },
+      "defaultClientScopes": ["tenant"],
       "optionalClientScopes": ["offline_access"]
     }
   ],

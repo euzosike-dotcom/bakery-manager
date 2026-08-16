@@ -1,5 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:uuid/uuid.dart';
 
 import 'core/auth/auth_client.dart';
@@ -40,7 +45,15 @@ import 'features/attendance/data/attendance_repository.dart';
 // NOTE: on an Android emulator, `localhost` refers to the emulator itself,
 // not your host machine — use `10.0.2.2` instead. iOS Simulator and desktop
 // builds can use `localhost` directly.
-const _devKeycloakIssuer = 'http://localhost:8080/realms/metrock';
+// TLS termination Part B (docs/RUNBOOK.md) — both the gateway and Keycloak
+// now speak HTTPS on their :8443/:8543 listeners with a self-signed dev
+// cert (infra/certs/generate-dev-certs.sh). ApiClient's HttpClient below is
+// pinned to trust exactly that cert; the Keycloak login flow instead relies
+// on the iOS Simulator's own keychain trusting it (xcrun simctl keychain
+// ... add-root-cert — a one-time per-simulator setup step, see RUNBOOK),
+// since AppAuth drives a native system browser Claude/ApiClient's
+// SecurityContext has no influence over.
+const _devKeycloakIssuer = 'https://localhost:8543/realms/metrock';
 const _devKeycloakClientId = 'metrock-mobile';
 const _devKeycloakRedirectUrl = 'com.metrock.metrockMobile:/oauth2redirect';
 // One entry point through the nginx API Gateway (infra/nginx/nginx.conf,
@@ -49,15 +62,30 @@ const _devKeycloakRedirectUrl = 'com.metrock.metrockMobile:/oauth2redirect';
 // base URL (e.g. $_devGatewayBaseUrl/procurement) instead of its own port.
 // A transparent proxy: the Bearer token and every other header pass
 // through untouched, so nothing about ApiClient/AuthClient itself changed.
-const _devGatewayBaseUrl = 'http://localhost:8000';
+const _devGatewayBaseUrl = 'https://localhost:8443';
 const _devWarehouseId = '7840f37a-13eb-4779-aa16-84bf10f7d351'; // WH-PLT1-RM, see infra/postgres/seed/dev_seed.sql
 
-void main() {
-  runApp(const MetrockApp());
+/// Builds an `http.Client` that trusts exactly the bundled dev cert
+/// (assets/certs/dev-cert.pem, copied by infra/certs/generate-dev-certs.sh)
+/// — deliberately NOT a blanket `badCertificateCallback` that accepts
+/// anything, which would silently swallow a real MITM in dev too. Every
+/// `ApiClient` below shares this one instance.
+Future<http.Client> _createPinnedHttpClient() async {
+  final certBytes = (await rootBundle.load('assets/certs/dev-cert.pem')).buffer.asUint8List();
+  final context = SecurityContext(withTrustedRoots: false)..setTrustedCertificatesBytes(certBytes);
+  return IOClient(HttpClient(context: context));
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final httpClient = await _createPinnedHttpClient();
+  runApp(MetrockApp(httpClient: httpClient));
 }
 
 class MetrockApp extends StatefulWidget {
-  const MetrockApp({super.key});
+  const MetrockApp({super.key, required this.httpClient});
+
+  final http.Client httpClient;
 
   @override
   State<MetrockApp> createState() => _MetrockAppState();
@@ -90,13 +118,13 @@ class _MetrockAppState extends State<MetrockApp> {
       clientId: _devKeycloakClientId,
       redirectUrl: _devKeycloakRedirectUrl,
     );
-    _procurementApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/procurement', deviceId: _deviceId, auth: _auth);
-    _manufacturingApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/manufacturing', deviceId: _deviceId, auth: _auth);
-    _salesApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/sales', deviceId: _deviceId, auth: _auth);
-    _crmApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/crm', deviceId: _deviceId, auth: _auth);
-    _fleetApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/fleet', deviceId: _deviceId, auth: _auth);
-    _hrApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/hr', deviceId: _deviceId, auth: _auth);
-    _governanceApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/governance', deviceId: _deviceId, auth: _auth);
+    _procurementApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/procurement', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _manufacturingApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/manufacturing', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _salesApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/sales', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _crmApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/crm', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _fleetApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/fleet', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _hrApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/hr', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _governanceApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/governance', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
     // Governance has no SyncModule entry at all — master data is
     // pull-only per SDD §3.A, never edited offline, so there's nothing
     // for the sync engine to push/pull for this module.

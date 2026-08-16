@@ -31,14 +31,16 @@ class AuthClient {
   })  : _appAuth = appAuth ?? const FlutterAppAuth(),
         _secureStorage = secureStorage ?? const FlutterSecureStorage();
 
-  /// Realm base URL, e.g. http://localhost:8080/realms/metrock — no
-  /// trailing slash. `allowInsecureConnections: true` below is required
-  /// for this to work over plain HTTP in dev; every other network call
-  /// this app makes (ApiClient's `http` calls to each backend service)
-  /// already hits `http://localhost:PORT` the same way — iOS exempts
-  /// loopback addresses from App Transport Security, so no Info.plist
-  /// change was needed for that, and AppAuth's own HTTP calls ride the
-  /// same exemption.
+  /// Realm base URL, e.g. https://localhost:8543/realms/metrock — no
+  /// trailing slash. TLS termination Part B (docs/RUNBOOK.md) put this on
+  /// genuine HTTPS, so `allowInsecureConnections` below is `false` — this
+  /// flow drives the native system browser (ASWebAuthenticationSession on
+  /// iOS), which validates the cert against the OS trust store, not
+  /// against ApiClient's pinned SecurityContext. The iOS Simulator's own
+  /// keychain has to trust the dev cert for that validation to pass (see
+  /// RUNBOOK's `xcrun simctl keychain ... add-root-cert` step) — a
+  /// separate mechanism from how ApiClient's Dart-level HTTP calls trust
+  /// it.
   final String issuer;
   final String clientId;
   final String redirectUrl;
@@ -97,7 +99,7 @@ class AuthClient {
         redirectUrl,
         discoveryUrl: _discoveryUrl,
         scopes: const ['openid', 'tenant', 'offline_access'],
-        allowInsecureConnections: true,
+        allowInsecureConnections: false,
       ),
     );
     await _persist(
@@ -122,7 +124,7 @@ class AuthClient {
             idTokenHint: idTokenHint,
             postLogoutRedirectUrl: redirectUrl,
             discoveryUrl: _discoveryUrl,
-            allowInsecureConnections: true,
+            allowInsecureConnections: false,
           ),
         );
       }
@@ -172,7 +174,7 @@ class AuthClient {
           redirectUrl,
           discoveryUrl: _discoveryUrl,
           refreshToken: refreshToken,
-          allowInsecureConnections: true,
+          allowInsecureConnections: false,
         ),
       );
       await _persist(

@@ -48,3 +48,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Self-signed dev TLS cert (infra/certs/generate-dev-certs.sh copies it
+  # here) — TLS termination Part B, docs/RUNBOOK.md. ApiClient pins its
+  # HttpClient's SecurityContext to exactly this cert rather than trusting
+  # the system store. Gitignored; run generate-dev-certs.sh before the
+  # first build if this file is missing.
+  assets:
+    - assets/certs/dev-cert.pem

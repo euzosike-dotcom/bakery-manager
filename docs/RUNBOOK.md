@@ -3213,14 +3213,138 @@ even flags that step.
 
 ### Known gaps after this pass
 
-- The Flutter app still points at `http://localhost:8000` and
-  `http://localhost:8080` — Part B (switching it to HTTPS) needs the iOS
-  Simulator taught to trust this self-signed cert, deliberately not
-  attempted here.
 - The 8 backend services, Postgres, Kafka, Redis, and MinIO remain fully
-  plaintext.
+  plaintext (Part B below covers the mobile app itself, not the rest of
+  the mesh).
 - No automated reminder that `seed-users.sh` needs re-running after a
   Keycloak realm reset — found and worked around this pass, not fixed.
 - Not part of `.github/workflows/ci.yml` — same reasoning as the gateway
   and rate-limiting passes before it; this is dev-stack infrastructure,
   not something the automated test suite exercises.
+
+## TLS termination (Part B — the Flutter app itself)
+
+Closes the gap Part A named: the mobile app now speaks HTTPS to both the
+gateway (`ApiClient`'s data calls) and Keycloak (`AuthClient`'s native
+login flow), not just plain HTTP with a TLS listener sitting unused
+alongside it. The two networking stacks trust the dev cert through two
+different mechanisms, because they're fundamentally different pieces of
+iOS plumbing:
+
+- **`ApiClient`** (Dart `http`/`IOClient`) is pinned to the one specific
+  dev cert via a `SecurityContext` — no system trust store involved.
+- **`AuthClient`**'s login (`flutter_appauth`) drives a native
+  `ASWebAuthenticationSession` (real system browser) — its TLS
+  validation is the OS's, not reachable from Dart at all. The iOS
+  Simulator's own keychain has to trust the cert instead.
+
+### 1. Bundling the cert into the app
+
+`infra/certs/generate-dev-certs.sh` now also copies `dev-cert.pem` (never
+the key) into `apps/mobile/assets/certs/dev-cert.pem`, registered as a
+Flutter asset in `pubspec.yaml`. Gitignored the same way as
+`infra/certs/*.pem` — regenerate/copy again any time the script re-runs;
+`flutter build`/`flutter test` fail on a missing asset, so this has to
+exist before the first build on a fresh clone.
+
+### 2. `ApiClient`'s pinned `SecurityContext`
+
+`main.dart`'s `main()` is now `async`, loads the bundled cert via
+`rootBundle.load(...)` before `runApp()`, and builds one
+`IOClient(HttpClient(context: SecurityContext(withTrustedRoots: false)
+..setTrustedCertificatesBytes(certBytes)))` shared by all 7
+`ApiClient` instances (`withTrustedRoots: false` deliberately — this
+client only ever talks to our own gateway, so it trusts exactly one cert
+and nothing else, not the full system CA list plus one addition).
+`_devGatewayBaseUrl` moved to `https://localhost:8443`.
+
+### 3. Trusting the cert for the native login flow
+
+`_devKeycloakIssuer` moved to `https://localhost:8543/realms/metrock`.
+`AuthClient`'s three AppAuth calls (`login`, `logout`'s `endSession`,
+token refresh) had `allowInsecureConnections` flipped from `true` to
+`false` — that flag permits plain HTTP, which no longer applies now that
+this is genuine TLS.
+
+For `ASWebAuthenticationSession` to accept the handshake, the iOS
+Simulator's own keychain needs the dev cert as a trusted root — a
+one-time step per simulator, not something the app or its build can do
+for itself:
+
+```bash
+xcrun simctl keychain <device-udid> add-root-cert infra/certs/dev-cert.pem
+```
+
+This is simulator-scoped state (`xcrun simctl erase` wipes it, a fresh
+simulator doesn't have it), not a change to the real macOS Keychain —
+the same reasoning Part A used to rule out `mkcert`. Every new simulator
+used for this app needs the command re-run once.
+
+### 4. Two bugs this surfaced, unrelated to the mobile-side work itself
+
+Verifying the real end-to-end login (not just a handshake) surfaced two
+pre-existing issues that had nothing to do with switching to HTTPS —
+they'd have bitten the HTTP flow too, just never got exercised this
+precisely before:
+
+- **`metrock-mobile`'s `tenant` scope wasn't actually assigned.**
+  `realm-export.json` relied on the realm's `defaultDefaultClientScopes`
+  (`["tenant"]`) applying automatically since the client didn't list
+  `defaultClientScopes` at all — but the live realm's client had an
+  *explicit* empty list, which doesn't inherit anything, and a real login
+  failed with `invalid_scope`. Fixed by making the assignment explicit in
+  `realm-export.json` (`"defaultClientScopes": ["tenant"]`) and applying
+  it live via the Admin API to unblock verification without another
+  restart. This wasn't a TLS issue — the same failure would hit an HTTP
+  login through the same client once the realm was re-imported.
+- **Keycloak's issuer claim follows whichever URL the client used.**
+  Logging in via `https://localhost:8543` gets tokens stamped
+  `iss: https://localhost:8543/realms/metrock`, not the
+  `http://localhost:8080` the 8 backend services were still configured
+  to expect — so every request failed with `jwt issuer invalid` even
+  though the login itself succeeded. Keycloak's `frontendUrl` realm
+  attribute can pin the issuer to one fixed value regardless of which
+  listener served the request, but pins the `authorization_endpoint`/
+  `token_endpoint` right along with it — setting it to the HTTP URL
+  would silently route the whole login flow back over plain HTTP,
+  defeating the point of this pass, so that approach was reverted after
+  confirming it via the discovery document. The real fix: `KEYCLOAK_ISSUER`
+  in all 8 backend services' `.env`/`.env.example` now reads
+  `https://localhost:8543/realms/metrock`, and each service's process
+  gets `NODE_EXTRA_CA_CERTS=infra/certs/dev-cert.pem` set before start so
+  `jwks-rsa`'s own HTTPS fetch of Keycloak's signing keys
+  (`${issuer}/protocol/openid-connect/certs`) trusts the same dev cert —
+  without it, every service would reject the token trying to verify its
+  signature, not just its issuer. This is the one piece of this pass that
+  reaches outside the mobile app: switching the login endpoint to HTTPS
+  changes what's stamped into every token, which every verifier has to
+  agree on.
+
+### 5. Verification — real login, not just a handshake
+
+- `flutter analyze` (no issues) and `flutter test` (all 12 existing
+  tests, unaffected — they mock `FlutterAppAuth`/`FlutterSecureStorage`
+  directly rather than hitting the network).
+- `xcrun simctl keychain ... add-root-cert`, then a real interactive
+  login on a booted "iPhone 17 Pro" simulator: `ASWebAuthenticationSession`
+  rendered Keycloak's actual themed login page over HTTPS with no cert
+  warning at all (confirming the keychain trust took effect), and
+  `chidinma.eze@metrock.dev` signed in for real.
+- Purchase Orders list and a Goods Receipt detail screen both loaded real
+  data through `https://localhost:8443/procurement/...` post-login —
+  confirms `ApiClient`'s pinned `SecurityContext` works for genuine data
+  calls, not just discovery.
+- Direct `curl` against a freshly-minted token, both through the gateway
+  and straight to `procurement-service:3001`, to isolate the issuer/JWKS
+  fix from the app-level verification above.
+
+### Known gaps after this pass
+
+- Postgres, Kafka, Redis, and MinIO remain fully plaintext — unchanged
+  from Part A, still a distinctly bigger, lower-priority lift.
+- `NODE_EXTRA_CA_CERTS` has to be set on every host-run backend service's
+  process at start, same as `seed-users.sh` above — nothing currently
+  automates that either; the ad hoc restart loop used for verification
+  sets it manually.
+- Not part of `.github/workflows/ci.yml`, same reasoning as every other
+  dev-stack infra pass.
