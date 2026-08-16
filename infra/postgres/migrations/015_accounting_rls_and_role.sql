@@ -29,7 +29,13 @@ END $$;
 -- can't UPDATE or DELETE a posted journal_lines row (the append-only RULEs
 -- from migration 005 apply regardless of which role is inserting), and it
 -- still can't touch any OTHER module's ability to post automatically.
-CREATE ROLE accounting_svc WITH LOGIN PASSWORD 'accounting_svc_dev_password';
+-- Password from :'accounting_svc_password' — see 007_app_role.sql's
+-- comment for why, and docs/RUNBOOK.md's "Secrets in production".
+\if :{?accounting_svc_password}
+\else
+  \set accounting_svc_password 'accounting_svc_dev_password'
+\endif
+CREATE ROLE accounting_svc WITH LOGIN PASSWORD :'accounting_svc_password';
 
 GRANT CONNECT ON DATABASE metrock_erp TO accounting_svc;
 GRANT USAGE ON SCHEMA public TO accounting_svc;

@@ -24,7 +24,13 @@ END $$;
 -- role is a Postgres superuser and must never be what a request-serving
 -- domain service connects as, or RLS is silently a no-op (see 007's
 -- comment for the full explanation).
-CREATE ROLE manufacturing_svc WITH LOGIN PASSWORD 'manufacturing_svc_dev_password';
+-- Password from :'manufacturing_svc_password' — see 007_app_role.sql's
+-- comment for why, and docs/RUNBOOK.md's "Secrets in production".
+\if :{?manufacturing_svc_password}
+\else
+  \set manufacturing_svc_password 'manufacturing_svc_dev_password'
+\endif
+CREATE ROLE manufacturing_svc WITH LOGIN PASSWORD :'manufacturing_svc_password';
 
 GRANT CONNECT ON DATABASE metrock_erp TO manufacturing_svc;
 GRANT USAGE ON SCHEMA public TO manufacturing_svc;

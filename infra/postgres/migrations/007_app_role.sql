@@ -14,7 +14,17 @@
 -- internal/db/pool.go for why that's an accepted, explicit tradeoff for a
 -- trusted internal batch consumer, not an oversight.
 
-CREATE ROLE procurement_svc WITH LOGIN PASSWORD 'procurement_svc_dev_password';
+-- Password comes from psql's :'procurement_svc_password' variable, not a
+-- literal — set it with -v on the command line for a real deployment
+-- (docs/RUNBOOK.md's "Secrets in production" section) to avoid ever
+-- committing a real credential to this file. \if/\else below supplies
+-- the same well-known dev default as before when nothing overrides it,
+-- so local dev and CI need zero changes.
+\if :{?procurement_svc_password}
+\else
+  \set procurement_svc_password 'procurement_svc_dev_password'
+\endif
+CREATE ROLE procurement_svc WITH LOGIN PASSWORD :'procurement_svc_password';
 
 GRANT CONNECT ON DATABASE metrock_erp TO procurement_svc;
 GRANT USAGE ON SCHEMA public TO procurement_svc;

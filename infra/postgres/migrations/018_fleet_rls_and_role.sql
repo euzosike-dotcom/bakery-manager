@@ -23,7 +23,13 @@ END $$;
 -- module's *_svc role — see 007_app_role.sql for the full explanation of
 -- why the bootstrap `metrock` superuser must never be what a
 -- request-serving domain service connects as.
-CREATE ROLE fleet_svc WITH LOGIN PASSWORD 'fleet_svc_dev_password';
+-- Password from :'fleet_svc_password' — see 007_app_role.sql's comment
+-- for why, and docs/RUNBOOK.md's "Secrets in production".
+\if :{?fleet_svc_password}
+\else
+  \set fleet_svc_password 'fleet_svc_dev_password'
+\endif
+CREATE ROLE fleet_svc WITH LOGIN PASSWORD :'fleet_svc_password';
 
 GRANT CONNECT ON DATABASE metrock_erp TO fleet_svc;
 GRANT USAGE ON SCHEMA public TO fleet_svc;

@@ -33,7 +33,13 @@ CREATE INDEX idx_audit_log_chain_seq ON audit_log (tenant_id, chain_seq);
 -- prior module's *_svc role — see 007_app_role.sql for the full
 -- explanation of why the bootstrap `metrock` superuser must never be
 -- what a request-serving domain service connects as.
-CREATE ROLE governance_svc WITH LOGIN PASSWORD 'governance_svc_dev_password';
+-- Password from :'governance_svc_password' — see 007_app_role.sql's
+-- comment for why, and docs/RUNBOOK.md's "Secrets in production".
+\if :{?governance_svc_password}
+\else
+  \set governance_svc_password 'governance_svc_dev_password'
+\endif
+CREATE ROLE governance_svc WITH LOGIN PASSWORD :'governance_svc_password';
 
 GRANT CONNECT ON DATABASE metrock_erp TO governance_svc;
 GRANT USAGE ON SCHEMA public TO governance_svc;

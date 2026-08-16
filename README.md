@@ -320,26 +320,31 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   hand curl verification, not a CI-enforced one. See `docs/RUNBOOK.md`'s
   "CI + test suite" Phase 1 through 4 sections for the full trail.
 - **All committed credentials are local-dev-only, and there's no real
-  secrets story for anything beyond that** — `infra/docker-compose.yml`'s
-  three passwords (Postgres, MinIO, Keycloak admin) are now overridable
-  via a gitignored `infra/.env` (`infra/.env.example` documents this;
-  `docker compose` reads it automatically from that directory), but the
-  DEFAULTS are still the exact same well-known values as before
-  (`metrock_dev_password`, `admin`) — this change makes them override-
-  able, it does not rotate or hide them, since they're not real secrets
-  to begin with. The 8 `*_svc_dev_password` values `infra/postgres/
-  migrations/*_role.sql` bakes into `CREATE ROLE ... PASSWORD` are
-  deliberately NOT parameterized the same way — every service's own
-  `.env.example` already hardcodes the matching value, so templating the
-  SQL would just relocate the same fixed-and-known password into a
-  different file, not reduce anything. None of this is fit for any
-  deployment reachable by anyone but the developer running it locally —
-  a real deployment needs an out-of-band, secrets-manager-driven
-  provisioning step (Vault, AWS Secrets Manager, Doppler, or similar)
-  that generates real per-environment credentials and injects them
-  without ever writing them to a file in this repo. That doesn't exist
-  here, on purpose — same "known, not solved" treatment as the missing
-  machine-to-machine auth above.
+  secrets story for anything beyond that.** `infra/docker-compose.yml`'s
+  three passwords (Postgres, MinIO, Keycloak admin) are overridable via a
+  gitignored `infra/.env` (`infra/.env.example` documents this; `docker
+  compose` reads it automatically from that directory). The 8
+  `*_svc_dev_password` values `infra/postgres/migrations/*_role.sql`
+  bakes in are no longer hardcoded literals — each file now reads its
+  role's password from a psql variable (`:'procurement_svc_password'`),
+  falling back via `\if`/`\else` to the exact same well-known dev value
+  when nothing overrides it, so local dev and CI are unaffected, but a
+  real deployment can pass `-v procurement_svc_password=<real-secret>`
+  without ever touching a tracked file. Verified via a real
+  `pg_authid.rolpassword` hash comparison, not just "the syntax parses"
+  — see docs/RUNBOOK.md's "Secrets in production" section. This closes
+  the one actual git-history leak (a real credential permanently baked
+  into a committed file); the DEFAULTS themselves are still deliberately
+  the same well-known values as before — they're not real secrets to
+  begin with, so there's nothing to hide there. None of this is fit for
+  any deployment reachable by anyone but the developer running it
+  locally — a real deployment still needs an out-of-band, secrets-
+  manager-driven provisioning step (Vault, AWS Secrets Manager, Doppler,
+  or whatever the eventual hosting platform provides) that generates real
+  per-environment credentials and injects them as env vars / `psql -v`
+  flags at deploy time. That doesn't exist here, on purpose — no cloud
+  deployment target exists yet to build it against, same "known, not
+  solved" treatment as the missing machine-to-machine auth above.
 - **`helmet` security headers on by default; CORS opt-in and unused so
   far.** `@metrock/backend-common`'s `applySecurityMiddleware` (called
   once per service from each `main.ts`, same shared-bootstrap pattern as

@@ -3348,3 +3348,95 @@ precisely before:
   sets it manually.
 - Not part of `.github/workflows/ci.yml`, same reasoning as every other
   dev-stack infra pass.
+
+## Secrets in production
+
+Fixes the one concrete credential leak in this repo — the 8 Postgres
+role passwords were hardcoded directly into committed SQL migration
+files (`infra/postgres/migrations/*_role.sql`), permanently in git
+history, unlike `infra/.env`/every service's own `.env` (already
+gitignored, already overridable). Everything else credential-shaped in
+this repo was already either gitignored or an explicitly-labeled,
+publicly-known local-dev default (`infra/.env.example`'s header comment
+covers the Postgres/MinIO/Keycloak-admin ones) — no Keycloak client
+secrets exist anywhere (both `metrock-test-client` and `metrock-mobile`
+are public/PKCE clients), so the SQL files were the only actual gap.
+
+Deliberately did NOT stand up a real secrets manager (Vault, AWS Secrets
+Manager, Doppler) to close this — there's no cloud deployment target for
+this platform yet (no AWS/GCP account, no k8s cluster, no deploy
+pipeline beyond this repo's own CI), so wiring one up now would be
+infrastructure for an environment that doesn't exist, the same trap
+tenant-subdomain resolution and per-tenant rate limiting avoided
+elsewhere in this codebase (see the API Gateway and rate-limiting
+sections above). The actual fix needed here is narrower and doesn't
+require picking a vendor.
+
+### The fix: psql variables with a default, not a hardcoded literal
+
+Each of the 8 `*_role.sql` files now reads its role's password from a
+psql variable instead of a string literal, falling back to the exact
+same well-known dev value as before when nothing overrides it:
+
+```sql
+\if :{?procurement_svc_password}
+\else
+  \set procurement_svc_password 'procurement_svc_dev_password'
+\endif
+CREATE ROLE procurement_svc WITH LOGIN PASSWORD :'procurement_svc_password';
+```
+
+`:{?varname}` (true/false: is this variable defined) and `\if`/`\else`/
+`\endif` have been in psql since Postgres 10 — safe on the `postgres:16-
+alpine` image this stack already uses. `:'varname'` (colon + quotes)
+substitutes the value as a properly-escaped SQL string literal, which is
+what's needed inside `PASSWORD '...'`.
+
+This means:
+- **Local dev and CI need zero changes** — running `psql -f
+  007_app_role.sql` with no `-v` flag falls through to the `\else`
+  branch and creates the exact same `procurement_svc_dev_password` as
+  before. Every existing verification step in this RUNBOOK, and
+  `.github/workflows/ci.yml`'s `procurement-integration` job, works
+  unmodified.
+- **A real deployment overrides via `-v`, never by editing this file** —
+  `psql -v procurement_svc_password=<real-secret-from-wherever> -f
+  007_app_role.sql`. The real secret never touches a file in this repo,
+  committed or otherwise; it only ever exists in whatever process invokes
+  psql (a deploy script, a CI job with the value injected from a secrets
+  manager as a masked pipeline variable, etc.) — see the "what a real
+  deployment still needs" note below for why this repo can't provide
+  that invoking process itself.
+
+### Verification — real hash comparison, not just "the syntax parses"
+
+- Ran the identical isolated pattern against a scratch role, confirmed
+  via `pg_authid.rolpassword` that the stored SCRAM hash actually
+  differs between a no-override run and a `-v`-overridden run (proving
+  the substitution takes effect, not just that psql accepts the syntax).
+- Ran all 21 migration files, in order, against a genuinely fresh
+  `postgres:16-alpine` container (not the long-running dev one) with no
+  `-v` overrides at all — the exact same invocation CI uses — confirmed
+  every file including all 8 parameterized ones runs cleanly start to
+  finish.
+- Repeated `007_app_role.sql` alone against that same fresh container
+  with `-v procurement_svc_password=a_totally_different_real_secret`,
+  compared `pg_authid.rolpassword` before/after: the hash changed,
+  confirming the override path works on the real file, not just the
+  isolated mimic above.
+
+### What a real deployment still needs (not built here, on purpose)
+
+Every backend service was already 12-factor before this pass — Postgres/
+Keycloak/Kafka credentials all come from `process.env`
+(`@nestjs/config`), never a hardcoded value in application code. That
+means the actual remaining gap isn't in this repo's code at all: a real
+deployment needs an out-of-band provisioning step — a secrets manager
+generating real per-environment credentials and injecting them as
+environment variables (and as `psql -v` flags for the migration step
+above) at container/job start, without ever writing them to a file this
+repo tracks. Which specific tool (Vault, AWS Secrets Manager, Doppler, or
+whatever the eventual hosting platform's own native mechanism is) is a
+decision that depends entirely on where this actually gets deployed —
+premature to pick now, and the code doesn't need to change regardless of
+which one gets chosen later.

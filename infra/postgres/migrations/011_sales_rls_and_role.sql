@@ -22,7 +22,13 @@ END $$;
 -- procurement_svc (007) / manufacturing_svc (009): the bootstrap `metrock`
 -- role is a superuser and must never be what a request-serving domain
 -- service connects as.
-CREATE ROLE sales_svc WITH LOGIN PASSWORD 'sales_svc_dev_password';
+-- Password from :'sales_svc_password' — see 007_app_role.sql's comment
+-- for why, and docs/RUNBOOK.md's "Secrets in production".
+\if :{?sales_svc_password}
+\else
+  \set sales_svc_password 'sales_svc_dev_password'
+\endif
+CREATE ROLE sales_svc WITH LOGIN PASSWORD :'sales_svc_password';
 
 GRANT CONNECT ON DATABASE metrock_erp TO sales_svc;
 GRANT USAGE ON SCHEMA public TO sales_svc;
