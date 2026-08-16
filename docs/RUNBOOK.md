@@ -3440,3 +3440,218 @@ whatever the eventual hosting platform's own native mechanism is) is a
 decision that depends entirely on where this actually gets deployed —
 premature to pick now, and the code doesn't need to change regardless of
 which one gets chosen later.
+
+## Observability
+
+Before this pass, `curl http://localhost:3001/health` returned a bare
+`401` — there was no route at all, so `KeycloakAuthMiddleware` rejected
+it like any other unauthenticated request, meaning nothing that isn't
+already holding a Bearer token (not `docker-compose`'s own healthcheck
+mechanism, not a real orchestrator's liveness probe, not a plain `curl`
+during incident triage) could ever check if a service is up. Logging was
+a single unstructured `console.log` on startup plus NestJS's default
+plain-text framework output — the Go `ledger-service` was already ahead
+here, logging structured JSON via `log/slog`. No request could be
+followed across a service boundary (the platform's one synchronous
+service-to-service call, `PostingAuthorityClient` -> governance-
+service's `/authorization-check`, left two separate, uncorrelated log
+streams). No metrics, no dashboards, nothing.
+
+Scoped in two tiers, following the same reasoning as the TLS and secrets
+passes before it: health checks, structured logs, and correlation ids
+aren't speculative — every eventual deployment target needs them
+regardless of which one gets chosen, and dev already benefits from them
+today. A full Prometheus + Grafana stack is more debatable with no real
+production traffic yet to make the dashboards load-bearing, but was
+explicitly requested as a proof-of-pattern rather than deferred the way
+a real secrets manager was in the previous pass — the scrape/dashboard
+pipeline itself is real, verified against live-generated traffic below,
+not just config that parses.
+
+### 1. `packages/backend-common`'s new observability primitives
+
+- **`request-context.ts`** — an `AsyncLocalStorage<{requestId}>`, not a
+  request-scoped Nest provider: the logger needs to read the current
+  request id from plain functions with no DI context of their own, and
+  Nest's request-scoped providers add a per-request instantiation cost
+  to the whole injection chain that this platform's request volume has
+  no reason to pay for.
+- **`request-id.middleware.ts`** — reuses an incoming `x-request-id` if
+  the caller already set one, otherwise generates one with
+  `crypto.randomUUID()` (Node stdlib, no new dependency for something
+  this small); echoes it back as a response header. Registered FIRST in
+  every service's `AppModule.configure()`, before `KeycloakAuthMiddleware`
+  — a request that fails auth still gets a request id on its log line.
+- **`structured-logger.ts`** — `StructuredLogger implements LoggerService`,
+  one JSON object per line, hand-rolled instead of pulling in
+  `pino`/`winston` (~80 lines, zero third-party dependency, matching this
+  repo's established preference — see `keycloak-auth.ts`'s doc comment on
+  choosing `jsonwebtoken`/`jwks-rsa` over `jose` for the same reason).
+  `app.useLogger(new StructuredLogger(serviceName))` in each `main.ts`
+  retroactively affects every `new Logger(context)` call already in that
+  service's code — Nest's `Logger` class delegates every instance's
+  methods to whatever `useLogger` installs (`Logger.overrideLogger`,
+  what `useLogger` calls internally), so no individual call site anywhere
+  needed to change. `{ bufferLogs: true }` on `NestFactory.create` holds
+  Nest's own bootstrap logs until `useLogger` runs, so even module-
+  loading output comes out as JSON instead of a few lines of the old
+  format slipping through first.
+- **`health.controller.ts`** — `GET /health`, `@SkipThrottle()`'d (opts
+  out of `RateLimitModule`'s flat per-IP cap, since a health check can
+  legitimately be polled far more often than real traffic). The route
+  alone doesn't make it unauthenticated — each service's
+  `KeycloakAuthMiddleware` exclusion does that.
+- **`metrics.module.ts`** — `GET /metrics` in Prometheus's text exposition
+  format. One `prom-client` `Registry` per service process
+  (`MetricsModule.forRoot(serviceName)`, a dynamic module, same pattern
+  `ThrottlerModule.forRoot(...)` already uses in `rate-limit.module.ts`),
+  seeded with `collectDefaultMetrics` (process CPU/memory/event-loop-lag/
+  GC, all free) plus an `http_requests_total` counter and
+  `http_request_duration_seconds` histogram a global `APP_INTERCEPTOR`
+  fills in for every request, both labeled `method`/`route`/`status_code`
+  plus a `service` default label so Prometheus can tell services apart
+  without relying on the scrape target address alone.
+- **`posting-authority.client.ts`** — now forwards the caller's own
+  `x-request-id` (read from `request-context.ts`) as a header on both its
+  outbound calls to governance-service, so one inbound request's logs can
+  be followed into governance-service's own log stream too — the
+  platform's first and so far only synchronous service-to-service call,
+  exactly the case correlation ids exist for.
+
+### 2. Wired into all 8 Node services
+
+Each service's `main.ts` and `app.module.ts` follow the identical new
+pattern (`governance-service` is the one exception, layering this
+alongside its own bespoke `KeycloakAuthMiddleware`/
+`TenantContextMiddleware` rather than the shared one):
+
+```ts
+// main.ts
+const app = await NestFactory.create(AppModule, { bufferLogs: true });
+app.useLogger(new StructuredLogger('procurement-service'));
+```
+
+```ts
+// app.module.ts
+imports: [..., HealthModule, MetricsModule.forRoot('procurement-service'), ...],
+// configure():
+consumer.apply(RequestIdMiddleware).forRoutes('*');
+consumer.apply(KeycloakAuthMiddleware).exclude('health', 'metrics').forRoutes('*');
+```
+
+`prom-client` and `rxjs` (the latter already present transitively via
+`@nestjs/core` but never declared) were added to `backend-common`'s
+`package.json` — `dependencies` and `peerDependencies` respectively — so
+this required the same full clean reinstall
+(`rm -rf node_modules package-lock.json && npm install`) per consuming
+service already established as this monorepo's standing playbook for any
+backend-common dependency change (bitten twice before: `helmet`, then
+`@nestjs/throttler`).
+
+### 3. `ledger-service` (Go) — a health/metrics server it never had
+
+Unlike the 8 Node services, `ledger-service` had zero HTTP surface before
+this — a pure Kafka consumer, blocking loop, no `net/http` anywhere. A
+new `internal/observability` package adds a side HTTP server
+(`internal/observability/server.go`, started in its own goroutine
+alongside the consumer loop in `cmd/ledger-service/main.go`, port
+`OBSERVABILITY_PORT` / default `9101`) exposing `/health` and `/metrics`
+(`github.com/prometheus/client_golang`'s `promhttp.Handler()`), plus
+three metrics meaningful to what this service actually does — it has no
+request traffic for a generic HTTP counter to measure the way the Node
+services' does:
+
+- `ledger_events_consumed_total` — every message read off the topic.
+- `ledger_events_failed_total` — events that hit an error (the posting
+  engine's own separate `failed_posting_review` queueing, SDD §4.2, is
+  unrelated data-layer bookkeeping this metric doesn't replace).
+- `ledger_posting_duration_seconds` — a histogram wrapping each
+  `handle()` call, Kafka delivery to commit/failure-record.
+
+**A real constraint this surfaced**: the latest `client_golang` (v1.24.x)
+pulls in transitive dependencies whose own `go.mod` require Go 1.25+,
+and `go get`/`go mod tidy` silently bumped this module's `go` directive
+to match — which would have broken `.github/workflows/ci.yml`'s pinned
+`go-version: '1.22'` the next time CI ran. Pinned to `client_golang
+v1.20.5` instead (confirmed via a real `go mod tidy` run that the `go`
+directive stays at `1.22`), the newest release that doesn't drag the
+toolchain requirement up. A real Go 1.25 upgrade across this module is a
+separate, deliberate decision, not something this pass should force as a
+side effect of adding a metrics client.
+
+### 4. Prometheus + Grafana in `docker-compose.yml`
+
+`infra/prometheus/prometheus.yml` — a static target list (this
+platform's own fixed, known set of services, nothing that needs service
+discovery), scraping all 8 Node services + `ledger-service` via
+`host.docker.internal` on their existing ports, the same pattern the
+nginx gateway already uses to reach them (they run on the host, not in
+this compose network). `grafana` is pre-provisioned
+(`infra/grafana/provisioning/`) with the Prometheus datasource (fixed
+`uid: prometheus-ds`, referenced explicitly by every panel) and one
+dashboard (`infra/grafana/dashboards/metrock-platform-overview.json`,
+tracked as a real file, not clicked together in the UI and lost on
+container recreation): HTTP request rate/5xx error rate/p95 latency per
+service, process RSS per service, and `ledger-service`'s three custom
+metrics. Both new host ports — `9090` (Prometheus) and `3000` (Grafana)
+— confirmed free against everything else this stack already uses.
+`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD` follow the exact same
+override-via-`infra/.env` convention as the Postgres/MinIO/Keycloak-admin
+credentials (`infra/.env.example`, "Secrets in production" above) —
+default `admin`/`admin`, not a real secret, same reasoning.
+
+### 5. Verification — real data, not just config that parses
+
+- All 8 Node services' `/health` returned real `200`s unauthenticated
+  after restarting with the new wiring; `/metrics` returned real
+  Prometheus-format text with the correct `service` label.
+- Structured JSON confirmed in each service's actual log output,
+  including Nest's own bootstrap lines (module loading, route mapping)
+  coming out as JSON via the `bufferLogs` + `useLogger` sequencing, not
+  just the one hand-written startup message.
+- **Correlation id, both directions, proven separately for real:**
+  - *Receiving*: sent a real request to governance-service's
+    `/authorization-check` with a manually-set `x-request-id` and a
+    tenant id that doesn't exist, deliberately forcing a real error deep
+    in `AuditService`'s Prisma transaction — the resulting structured
+    error log, several async layers past the middleware, carried the
+    exact `x-request-id` supplied, proving the id survives real nested
+    async/await chains, not just a flat request handler.
+  - *Sending*: `request-context.ts`'s `AsyncLocalStorage` mechanism
+    (what `PostingAuthorityClient` relies on to forward the current
+    request's id) tested directly with real Node execution — two
+    concurrent simulated requests, each with its own id, resolved
+    correctly and without cross-contamination after multiple `await`
+    hops, confirming the context is safely isolated per-request under
+    concurrency, not just correct in a single sequential case.
+- `docker compose up -d prometheus grafana` — both started cleanly;
+  `curl http://localhost:9090/api/v1/targets` showed all 9 scrape targets
+  (`up`, zero errors) once every service was restarted with the new
+  `/metrics` route.
+- Logged into Grafana for real (`http://localhost:3000`, dev default
+  credentials) and viewed the actual provisioned dashboard rendering real
+  scraped data — then generated real HTTP traffic against
+  procurement-service and watched the "HTTP request rate by service"
+  panel spike live, confirming the whole pipeline end-to-end rather than
+  trusting that scrape configs and panel JSON were merely well-formed.
+
+### Known gaps after this pass
+
+- **No real alerting pipeline** — still a structured log line for things
+  like an authorization bypass attempt, not an actual email/Slack/pager
+  integration (unchanged from the pre-existing "known, not solved" gap;
+  Grafana can alert off these same Prometheus metrics, but no alert
+  rules or a notification channel are configured).
+- **No distributed tracing** (OpenTelemetry spans) — correlation ids let
+  you grep the same id across two services' logs by hand; there's no
+  automatic trace visualization tying a request's full cross-service
+  timeline together the way Jaeger/Tempo would.
+- **No log aggregation** — each service's structured JSON still only
+  goes to its own stdout/log file; nothing centralizes it (Loki, ELK, or
+  similar) for cross-service querying without SSHing/grepping each one.
+- **Prometheus/Grafana have no persistence/backup story of their own** —
+  `.prometheus-data`/`.grafana-data` are plain bind-mounted directories,
+  gitignored, with no retention policy tuned beyond Prometheus's default.
+- Not part of `.github/workflows/ci.yml` — same reasoning as every other
+  dev-stack infra pass; nothing in the automated test suite exercises
+  `/health`/`/metrics` or the Prometheus/Grafana containers.

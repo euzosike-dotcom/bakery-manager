@@ -1,0 +1,15 @@
+# Points Grafana at infra/grafana/dashboards/ (mounted separately in
+# docker-compose.yml) so dashboard JSON lands in the repo as a normal
+# tracked file, not something clicked together in the UI and lost on
+# container recreation.
+apiVersion: 1
+
+providers:
+  - name: Metrock
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

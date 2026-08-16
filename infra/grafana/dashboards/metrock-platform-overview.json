@@ -1,0 +1,106 @@
+{
+  "title": "Metrock Platform Overview",
+  "uid": "metrock-platform-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP request rate by service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "sum(rate(http_requests_total[1m])) by (service)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "HTTP error rate (5xx) by service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "sum(rate(http_requests_total{status_code=~\"5..\"}[1m])) by (service)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "title": "p95 request latency by service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "Node service process memory (RSS)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "title": "ledger-service: events consumed vs failed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "rate(ledger_events_consumed_total[1m])",
+          "legendFormat": "consumed"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "rate(ledger_events_failed_total[1m])",
+          "legendFormat": "failed"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "title": "ledger-service: p95 posting duration",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "histogram_quantile(0.95, sum(rate(ledger_posting_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    }
+  ]
+}

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/metrock/ledger-service/internal/ledger"
+	"github.com/metrock/ledger-service/internal/observability"
 	segmentkafka "github.com/segmentio/kafka-go"
 )
 
@@ -51,10 +53,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return fmt.Errorf("fetching message: %w", err)
 		}
 
-		if err := c.handle(ctx, msg.Value); err != nil {
+		observability.EventsConsumedTotal.Inc()
+		start := time.Now()
+		err = c.handle(ctx, msg.Value)
+		observability.PostingDurationSeconds.Observe(time.Since(start).Seconds())
+		if err != nil {
 			// Log and continue rather than blocking the partition — the
 			// posting engine already routes unprocessable events to
 			// failed_posting_review for human follow-up (SDD §4.2).
+			observability.EventsFailedTotal.Inc()
 			slog.Error("failed to handle event", "error", err, "offset", msg.Offset)
 		}
 

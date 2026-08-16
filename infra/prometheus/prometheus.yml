@@ -1,0 +1,39 @@
+# Scrapes the /metrics endpoint every backend service now exposes
+# (docs/RUNBOOK.md's "Observability" section) — the 8 Node services plus
+# the Go ledger-service, all reached via host.docker.internal the same
+# way the nginx gateway reaches them (they run on the host, not in this
+# compose network; see infra/nginx/nginx.conf's own header comment for
+# the established reasoning). No service discovery mechanism — a static
+# target list matches this platform's own fixed, known set of services;
+# nothing here needs to scale to a dynamic fleet.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: procurement-service
+    static_configs:
+      - targets: ['host.docker.internal:3001']
+  - job_name: manufacturing-service
+    static_configs:
+      - targets: ['host.docker.internal:3002']
+  - job_name: sales-service
+    static_configs:
+      - targets: ['host.docker.internal:3003']
+  - job_name: accounting-service
+    static_configs:
+      - targets: ['host.docker.internal:3004']
+  - job_name: crm-service
+    static_configs:
+      - targets: ['host.docker.internal:3005']
+  - job_name: fleet-service
+    static_configs:
+      - targets: ['host.docker.internal:3006']
+  - job_name: hr-service
+    static_configs:
+      - targets: ['host.docker.internal:3007']
+  - job_name: governance-service
+    static_configs:
+      - targets: ['host.docker.internal:3008']
+  - job_name: ledger-service
+    static_configs:
+      - targets: ['host.docker.internal:9101']

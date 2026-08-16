@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { getRequestId } from './request-context';
 
 export type PostingPermission = 'can_approve' | 'can_post' | 'can_override';
 
@@ -63,12 +64,30 @@ export class PostingAuthorityClient {
 
   constructor(private readonly governanceBaseUrl: string) {}
 
+  /**
+   * Forwards the caller's own correlation id (see `request-context.ts`)
+   * so one inbound request's logs can be followed into governance-
+   * service's own log stream, not just within the caller — this is the
+   * platform's first and so far only synchronous service-to-service
+   * call, exactly the case correlation ids exist for. Absent outside a
+   * request context (e.g. a test calling this directly), which is fine —
+   * `RequestIdMiddleware` always sets one for real HTTP traffic.
+   */
+  private headers(tenantId: string): Record<string, string> {
+    const requestId = getRequestId();
+    return {
+      'Content-Type': 'application/json',
+      'x-tenant-id': tenantId,
+      ...(requestId ? { 'x-request-id': requestId } : {}),
+    };
+  }
+
   async checkAuthority(params: CheckAuthorityParams): Promise<void> {
     let res: Response;
     try {
       res = await fetch(`${this.governanceBaseUrl}/authorization-check`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-tenant-id': params.tenantId },
+        headers: this.headers(params.tenantId),
         body: JSON.stringify({
           userId: params.userId,
           requiredPermission: params.requiredPermission,
@@ -108,7 +127,7 @@ export class PostingAuthorityClient {
     try {
       res = await fetch(`${this.governanceBaseUrl}/approval-check`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-tenant-id': params.tenantId },
+        headers: this.headers(params.tenantId),
         body: JSON.stringify({
           userId: params.userId,
           moduleName: params.moduleName,

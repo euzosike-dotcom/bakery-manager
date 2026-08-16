@@ -7,3 +7,8 @@ export * from './keycloak-auth';
 export * from './keycloak-auth.middleware';
 export * from './security-middleware';
 export * from './rate-limit.module';
+export * from './request-context';
+export * from './request-id.middleware';
+export * from './structured-logger';
+export * from './health.controller';
+export * from './metrics.module';

@@ -122,3 +122,41 @@ services:
       # Linux Docker Engine, where host.docker.internal doesn't resolve
       # without this.
       - "host.docker.internal:host-gateway"
+
+  # Observability (docs/RUNBOOK.md's "Observability" section) — scrapes
+  # every backend service's new /metrics endpoint (all 8 Node services +
+  # the Go ledger-service), a static target list matching this
+  # platform's own fixed set of services (infra/prometheus/prometheus.yml).
+  # Same host.docker.internal pattern as the gateway above: those
+  # services run on the host, not in this compose network.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./.prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Pre-provisioned with the Prometheus datasource and one dashboard
+  # (infra/grafana/provisioning/, infra/grafana/dashboards/) — no manual
+  # click-through setup needed after `docker compose up`. Proof-of-
+  # pattern for now (docs/RUNBOOK.md): there's no real production traffic
+  # yet for these panels to be load-bearing against, but the scrape/
+  # dashboard pipeline itself is real, not just config that parses.
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./.grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus

@@ -14,6 +14,7 @@ import (
 	"github.com/metrock/ledger-service/internal/db"
 	"github.com/metrock/ledger-service/internal/kafka"
 	"github.com/metrock/ledger-service/internal/ledger"
+	"github.com/metrock/ledger-service/internal/observability"
 )
 
 func main() {
@@ -24,6 +25,14 @@ func main() {
 	brokers := strings.Split(envOrDefault("KAFKA_BROKERS", "localhost:9092"), ",")
 	topic := envOrDefault("KAFKA_TOPIC", "erp.events")
 	groupID := envOrDefault("KAFKA_CONSUMER_GROUP", "ledger-service")
+	observabilityAddr := ":" + envOrDefault("OBSERVABILITY_PORT", "9101")
+
+	// Side HTTP listener for /health and /metrics — this service has no
+	// other HTTP surface (it's a pure Kafka consumer), so this exists
+	// purely for the same operational visibility the 8 Node services got
+	// in the same pass (docs/RUNBOOK.md's "Observability" section), not
+	// to serve any of ledger-service's actual work.
+	go observability.Serve(ctx, observabilityAddr)
 
 	pool, err := db.NewPool(ctx, databaseURL)
 	if err != nil {

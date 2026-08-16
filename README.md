@@ -436,9 +436,38 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   patching" than "23 vulnerabilities," but nothing here is patched — a
   genuine NestJS 10→11 migration, verified with the same rigor as every
   other change in this repo, is the honest fix and hasn't been scheduled.
-- **No real alerting pipeline** — SDD §4.2's "raise a real-time alert" on
-  an authorization bypass attempt is a structured log line, not an actual
-  email/Slack/pager integration.
+- **Observability now covers health checks, structured logs, correlation
+  ids, and a real Prometheus + Grafana stack — but still no alerting,
+  tracing, or log aggregation.** Every backend service (all 8 Node
+  services + the Go `ledger-service`, which had zero HTTP surface before
+  this) now exposes an unauthenticated `GET /health` and a
+  `GET /metrics` in Prometheus format; logs are structured JSON
+  (`@metrock/backend-common`'s hand-rolled `StructuredLogger`, zero new
+  dependency, replacing plain `console.log`/Nest's default text output);
+  every request gets a correlation id (`RequestIdMiddleware` +
+  `AsyncLocalStorage`) forwarded across the platform's one synchronous
+  service-to-service call (`PostingAuthorityClient` -> governance-
+  service) so one request's logs can be followed across that boundary —
+  verified for real by forcing an actual error deep in governance-
+  service's Prisma transaction and confirming the supplied id survived
+  several async layers into the resulting log line, plus a real
+  concurrent-execution test of the underlying `AsyncLocalStorage`
+  mechanism itself. `infra/prometheus/prometheus.yml` scrapes all 9
+  services via `host.docker.internal` (the same pattern the nginx
+  gateway already uses); Grafana is pre-provisioned with a real dashboard
+  (`infra/grafana/dashboards/metrock-platform-overview.json`, a tracked
+  file, not clicked together in the UI) — confirmed rendering live data
+  by generating real HTTP traffic and watching a panel spike in the
+  browser, not just "the scrape config parses." SDD §4.2's "raise a
+  real-time alert" on an authorization bypass attempt is still a
+  structured log line, not an actual email/Slack/pager integration —
+  Grafana could alert off these same metrics, but no alert rules or
+  notification channel are configured. Also still missing: distributed
+  tracing (no automatic cross-service trace visualization, just greppable
+  correlation ids) and log aggregation (each service's JSON still only
+  goes to its own stdout — no Loki/ELK centralizing it). See
+  docs/RUNBOOK.md's "Observability" section for the full build and
+  verification trail.
 - **Prefer `json` over `jsonb` (or canonicalize explicitly) for anything
   that must round-trip byte-identical** — `AuditService`'s hash chain
   initially failed verification because Postgres `jsonb` reorders object

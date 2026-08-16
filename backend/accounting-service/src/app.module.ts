@@ -1,6 +1,12 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { KeycloakAuthMiddleware, RateLimitModule } from '@metrock/backend-common';
+import {
+  HealthModule,
+  KeycloakAuthMiddleware,
+  MetricsModule,
+  RateLimitModule,
+  RequestIdMiddleware,
+} from '@metrock/backend-common';
 import { PrismaModule } from './common/prisma.module';
 import { KafkaModule } from './common/kafka.module';
 import { GovernanceModule } from './common/governance.module';
@@ -14,6 +20,8 @@ import { KafkaConsumerModule } from './kafka/kafka-consumer.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     RateLimitModule,
+    HealthModule,
+    MetricsModule.forRoot('accounting-service'),
     PrismaModule,
     KafkaModule,
     GovernanceModule,
@@ -33,7 +41,11 @@ export class AppModule implements NestModule {
     // exact call list), matching the "Accounting has no Flutter UI"
     // known gap. The Kafka consumer is unaffected either way — it gets
     // tenantId straight from each event's own tenant_id field, never from
-    // HTTP middleware.
-    consumer.apply(KeycloakAuthMiddleware).forRoutes('*');
+    // HTTP middleware. `health`/`metrics` ARE excluded below (observability
+    // pass, docs/RUNBOOK.md) — unauthenticated on purpose.
+    // RequestIdMiddleware runs first, for everything, so even a 401 gets
+    // a correlated log line.
+    consumer.apply(RequestIdMiddleware).forRoutes('*');
+    consumer.apply(KeycloakAuthMiddleware).exclude('health', 'metrics').forRoutes('*');
   }
 }

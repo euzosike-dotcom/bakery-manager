@@ -1,0 +1,15 @@
+# Auto-provisions the Prometheus datasource on Grafana startup — no
+# manual "add a datasource" click-through needed. `prometheus:9090` is
+# the compose-network-internal address (both containers are on
+# `metrock-erp_default`), not host.docker.internal — unlike the backend
+# services, Prometheus itself runs IN this compose network.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus-ds
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

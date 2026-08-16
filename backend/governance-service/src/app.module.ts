@@ -1,6 +1,12 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { TenantContextMiddleware, RateLimitModule } from '@metrock/backend-common';
+import {
+  HealthModule,
+  MetricsModule,
+  RateLimitModule,
+  RequestIdMiddleware,
+  TenantContextMiddleware,
+} from '@metrock/backend-common';
 import { KeycloakAuthMiddleware } from './common/keycloak-auth.middleware';
 import { PrismaModule } from './common/prisma.module';
 import { TenantModule } from './tenant/tenant.module';
@@ -17,6 +23,8 @@ import { AuthorizationModule } from './authorization/authorization.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     RateLimitModule,
+    HealthModule,
+    MetricsModule.forRoot('governance-service'),
     PrismaModule,
     TenantModule,
     PlantsModule,
@@ -41,8 +49,17 @@ export class AppModule implements NestModule {
     // separate, still out-of-scope story. `GET /users`' own exclusion
     // (added for the Flutter mobile Users tab) was retired here in
     // Phase 3 once the mobile app started sending real Bearer tokens for
-    // every call — see docs/RUNBOOK.md.
+    // every call — see docs/RUNBOOK.md. `health`/`metrics` are the new
+    // ones (observability pass, docs/RUNBOOK.md) — unauthenticated on
+    // purpose. RequestIdMiddleware runs first, for everything (including
+    // authorization-check/approval-check, so a request-id forwarded by
+    // another service's PostingAuthorityClient is honored rather than
+    // overwritten — see request-id.middleware.ts).
+    consumer.apply(RequestIdMiddleware).forRoutes('*');
     consumer.apply(TenantContextMiddleware).forRoutes('authorization-check', 'approval-check');
-    consumer.apply(KeycloakAuthMiddleware).exclude('authorization-check', 'approval-check').forRoutes('*');
+    consumer
+      .apply(KeycloakAuthMiddleware)
+      .exclude('authorization-check', 'approval-check', 'health', 'metrics')
+      .forRoutes('*');
   }
 }
