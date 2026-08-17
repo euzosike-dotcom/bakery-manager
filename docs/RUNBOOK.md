@@ -3815,3 +3815,125 @@ any backend-common dependency/export change.
   Keycloak token end-to-end (Phase 1-2's mocked unit tests stub
   `PostingAuthorityClient` entirely, Phase 3's real-Postgres integration
   tests don't touch governance-service).
+
+## NestJS 10→11 migration
+
+Closes the npm audit reachability analysis's own conclusion: real
+exposure was "one DoS chain worth eventually patching," and the honest
+fix — a real major-version migration, verified with the same rigor as
+everything else in this repo — "hasn't been scheduled." It's scheduled
+now.
+
+### Why this couldn't be staggered service-by-service
+
+`@metrock/backend-common` declares `@nestjs/common`/`@nestjs/core` as
+`peerDependencies` — every one of the 8 services installs it via
+`file:` (copied, not symlinked, `install-links=true`, this monorepo's
+established gotcha). Widening those peer ranges is a change to
+`backend-common` itself, which every consumer picks up on its next
+install regardless of whether IT was "supposed" to be touched yet — so
+there's no clean way to migrate one service while backend-common stays
+on v10. The migration is one coordinated pass by construction, not a
+choice to batch it that way.
+
+### The real risk: Express 4→5, and one pattern used by every service
+
+`@nestjs/platform-express@11` bundles Express 5 (was Express 4) — a
+major version with real breaking changes, chief among them a new
+path-to-regexp release that changed route-pattern matching syntax.
+That matters here specifically because `consumer.apply(...).forRoutes('*')`
+is the pattern gating every service's `RequestIdMiddleware` and
+`KeycloakAuthMiddleware`/`M2MAuthMiddleware` — the wildcard IS the
+auth-and-observability backbone across this whole platform. If Express
+5's matching engine silently stopped matching that wildcard the way
+Express 4 did, it would not fail a build or throw an exception — it
+would just mean middleware silently stopped running, i.e. a platform-
+wide auth bypass indistinguishable from "everything looks fine" until
+someone noticed unauthenticated requests succeeding. That single
+possibility shaped the whole rollout order below: prove it on one
+service with real live requests before touching the other seven.
+
+Confirmed the other likely friction points before starting, not
+assumed away:
+- Node 20+ required by `@nestjs/core@11` — CI and local dev already on
+  Node 20 (`.github/workflows/ci.yml`), no change needed.
+- `@nestjs/throttler@6.5.0` (already pinned, the rate-limiting pass)
+  already declares peer support for `@nestjs/core@^11.0.0` — confirmed
+  via `npm view`, no version bump needed for that package at all.
+- `@types/express` is a DIRECT devDependency in all 8 services'
+  `package.json` (the standard Nest CLI scaffold default) plus
+  `backend-common` — not just inherited transitively from
+  `@nestjs/platform-express` — so all 9 needed an explicit 4→5 bump for
+  the 5 files that `import { Request, Response, NextFunction } from
+  'express'` directly (`backend-common`'s middleware files,
+  `governance-service`'s own bespoke `keycloak-auth.middleware.ts`) to
+  typecheck against the new Express types.
+
+### Version set (all 9 packages, identical)
+
+`@nestjs/common`/`@nestjs/core`/`@nestjs/platform-express` →
+`^11.2.1`, `@nestjs/config` `^3.3.0` → `^4.0.4`, `@nestjs/cli`
+`^10.4.5` → `^11.0.24` (this is the literal `nest build`/`nest start`
+command every service's `package.json` scripts and this whole session's
+own dev-restart loop depend on, not a peripheral dev tool),
+`@nestjs/testing` → `^11.2.1`, `@types/express` `^4.17.21` → `^5.0.6`.
+`backend-common`'s own `peerDependencies` for `@nestjs/common`/
+`@nestjs/core`/`express` bumped to match (`express` peer range to
+`^5.0.0`).
+
+### Rollout: pilot first, then the rest
+
+1. Bumped `backend-common` + `procurement-service` together (the
+   smallest possible coordinated unit, per the constraint above). Full
+   clean reinstall, clean `tsc --noEmit`, a real `nest build` (exercises
+   the CLI bump, not just the library packages), all 8 existing Jest
+   tests passing unmodified.
+2. **Live-verified the one real risk before rolling further** — restarted
+   procurement-service for real and hit it with actual HTTP requests:
+   `GET /purchase-orders` with no token → real `401` (wildcard-gated auth
+   still blocking); `GET /health` and `GET /metrics` → real `200`s with no
+   token (`.exclude()` still bypassing correctly); `GET /purchase-orders`
+   with a real Keycloak token → real `200`. The wildcard match held under
+   Express 5 — confirmed, not assumed from "the tests passed."
+3. Rolled the identical version set to the remaining 7 services. Full
+   clean reinstall + `tsc --noEmit` + real `nest build` for each — all
+   clean.
+4. All 62 existing Jest tests across all 8 services still pass,
+   unmodified — these mock at layer boundaries that don't touch Express
+   routing directly, so this was the expected (and confirmed) outcome,
+   not the risky part.
+5. Re-ran procurement-service's real-Postgres integration suite (Phase
+   3's RLS cross-tenant-isolation proof + real-SQL over-receipt/approval
+   persistence checks) — all 6 passing against actual Postgres, not
+   mocked.
+6. Restarted the full 8-service stack and spot-checked the cross-cutting
+   things earlier passes built that also touch routing/middleware, since
+   this migration's blast radius genuinely does cover all of them:
+   - TLS gateway routing (`https://localhost:8443/procurement/purchase-orders`
+     with a real token) — real `200`.
+   - `helmet` response headers (`X-Content-Type-Options`,
+     `X-Frame-Options`) — still present.
+   - The full machine-to-machine auth chain, end to end, through actual
+     application code: a real vendor-bill payment via accounting-service
+     (`POST /vendor-bills/:billId/payments`) that only succeeds if
+     `M2MTokenClient` mints a token, `PostingAuthorityClient` sends it,
+     governance-service's `M2MAuthMiddleware` verifies + allow-lists it,
+     and `AuthorizationService.checkAuthority` grants it — real `201`,
+     real `billStatus` change in the database (`OPEN` → `PARTIALLY_PAID`),
+     not a hand-built curl standing in for the real code path.
+7. `npm audit` across all 9 packages: **0 vulnerabilities**, down from
+   23-24 each — confirmed after the full migration, not assumed from the
+   package.json diff alone.
+
+### Known gaps after this pass
+
+- `@nestjs/config`'s v3→v4 migration notes were reviewed for breaking
+  changes but this repo's own usage (`ConfigModule.forRoot({ isGlobal:
+  true })`) is about as minimal as that API gets — no behavior change
+  observed or expected beyond what the test/live-request verification
+  above already covers.
+- Not part of `.github/workflows/ci.yml` as its own gate — the existing
+  `node-services` matrix job's `npm install`/`npm run build`/`npm test`
+  steps exercise the new versions on every future push the same way they
+  exercised v10 before, so no separate CI step was needed; this is a
+  dependency version change, not new infrastructure.

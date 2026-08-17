@@ -421,38 +421,35 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `NODE_EXTRA_CA_CERTS` (for their own JWKS fetch) had to move with it —
   see docs/RUNBOOK.md's "TLS termination (Part B)" for why that
   couldn't be avoided by pinning Keycloak's issuer instead.
-- **`npm audit` reports 23 vulnerabilities per service (3 low, 13
-  moderate, 7 high) — but the actual exploitable surface is much smaller
-  than that count suggests, and NOT force-fixed on purpose.** Every fix
-  path `npm audit` offers except one requires `--force`, and every one of
-  those forces the same thing: bumping `@nestjs/core` from 10.x to 11.x —
-  a framework major-version migration across all 8 services, not a
-  patch, with its own real regression risk against everything this
-  session has already built and verified. Breaking down what the count
-  actually contains:
-  - **Dev-tooling only, zero runtime exposure**: `ajv`, `glob`,
-    `picomatch`, `tmp`/`inquirer`/`external-editor`, `webpack` — all
-    pulled in transitively by `@nestjs/cli`'s build/scaffolding tooling,
-    never loaded by the deployed server process. Unreachable by anyone
-    calling the API, regardless of severity rating.
-  - **Present in `node_modules`, code path never invoked**: `multer` and
-    `file-type` ship bundled with `@nestjs/platform-express`/
-    `@nestjs/common`, but nothing in this codebase registers a
-    `FileInterceptor` or serves static files (confirmed by grep across
-    every service, not assumed) — the vulnerable functions are never
-    called.
-  - **Genuinely reachable**: the `qs`/`express`/`body-parser` DoS chain,
-    and `@nestjs/config`'s `lodash` prototype-pollution advisory
-    (`@nestjs/config` is a real runtime dependency of every service's
-    `AppModule`, though the vulnerable `lodash` functions are used
-    internally for config-merging, not exposed to raw request bodies).
-  - The ONE fix `npm audit fix` offers without `--force` is `file-type` —
-    the one entry whose vulnerable path isn't even reachable.
-
-  Net: real exposure is closer to "one DoS chain worth eventually
-  patching" than "23 vulnerabilities," but nothing here is patched — a
-  genuine NestJS 10→11 migration, verified with the same rigor as every
-  other change in this repo, is the honest fix and hasn't been scheduled.
+- **NestJS 10→11 migration is complete — `npm audit` now reports 0
+  vulnerabilities across all 8 services and `@metrock/backend-common`**,
+  down from 23-24 per service. `@nestjs/common`/`core`/`platform-express`
+  10→11.2.1, `@nestjs/config` 3→4.0.4, `@nestjs/cli`/`testing` 10→11,
+  `@types/express` 4→5.0.6 — one coordinated bump, not staggered, since
+  `@metrock/backend-common`'s peer ranges have to move before any
+  consumer can, so a partial migration isn't really possible. The one
+  real regression risk this carried: `@nestjs/platform-express@11`
+  bundles Express 5, which changed route-pattern matching, and
+  `consumer.apply(...).forRoutes('*')` is the exact pattern gating EVERY
+  service's auth and request-id middleware — if Express 5's matching
+  silently stopped matching that wildcard, it would be a platform-wide
+  silent auth bypass, not a build error. Piloted on
+  `@metrock/backend-common` + `procurement-service` first; before
+  touching the other 7, confirmed live against a real running v11
+  process that an unauthenticated request to a normal route still gets a
+  real `401`, `/health`/`/metrics` still bypass auth via `.exclude()`,
+  and a real Keycloak token still succeeds — the wildcard match held.
+  Rolled the identical version set to the remaining 7 services, reran
+  all 62 existing Jest tests plus procurement-service's real-Postgres
+  integration suite (all passing, unmodified), and spot-checked the
+  cross-cutting things this session already built that touch
+  routing/middleware: the TLS gateway (`https://localhost:8443` routing
+  still 200s), helmet headers (still present), and the full
+  machine-to-machine auth chain (a real vendor-bill payment through
+  accounting-service → `PostingAuthorityClient` → governance-service's
+  `M2MAuthMiddleware`, real database state change, not a mocked
+  assertion). See docs/RUNBOOK.md's "NestJS 10→11 migration" section for
+  the full trail.
 - **Observability now covers health checks, structured logs, correlation
   ids, and a real Prometheus + Grafana stack — but still no alerting,
   tracing, or log aggregation.** Every backend service (all 8 Node
