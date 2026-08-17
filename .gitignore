@@ -28,6 +28,10 @@ infra/.miniodata/
 infra/.prometheus-data/
 infra/.grafana-data/
 
+# Database dumps (infra/postgres/backup.sh) — data, not something that
+# belongs in git history.
+infra/.backups/
+
 # Self-signed dev TLS certs (infra/certs/generate-dev-certs.sh) — always
 # regenerable per-machine; never commit a private key even a throwaway one.
 infra/certs/*.pem

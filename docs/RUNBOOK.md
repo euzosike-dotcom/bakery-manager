@@ -3937,3 +3937,111 @@ own dev-restart loop depend on, not a peripheral dev tool),
   steps exercise the new versions on every future push the same way they
   exercised v10 before, so no separate CI step was needed; this is a
   dependency version change, not new infrastructure.
+
+## Backup & restore
+
+Before this pass: Postgres data lived only in `infra/.pgdata/`, a
+bind-mounted directory on the host — survives a container restart or
+`docker compose down`/`up`, but not a lost/reformatted disk, and with no
+tested procedure for getting it back regardless. Scoped narrow on
+purpose, the same reasoning as the secrets-manager and observability
+passes before it: a real production DR story (continuous WAL archiving,
+point-in-time recovery, automated retention) depends entirely on
+whichever managed Postgres or self-hosted setup this eventually runs on,
+none of which exists yet — building that now would be real
+infrastructure for an environment that doesn't exist. What's genuinely
+useful regardless of hosting target: an on-demand backup/restore
+capability, actually proven to work, not just a script that's never
+been run against a real recovery scenario.
+
+### `infra/postgres/backup.sh` / `restore.sh` — data only, not schema
+
+Both run `pg_dump`/`pg_restore` inside the running postgres container
+via `docker exec` — no local psql/pg_dump client needed (this machine
+doesn't have one; every SQL verification earlier in this project went
+through the container the same way). Custom format (`-F custom`),
+compressed, dependency-ordered restore.
+
+Deliberately **data-only**, not schema+data. Schema already has a
+canonical source of truth — `infra/postgres/migrations/*.sql`, reviewed
+and tested far more rigorously than anything a point-in-time dump could
+claim to be. Baking a second copy of the schema into every dump would
+just be a second thing that can drift out of sync with the first
+(a dump taken before a migration lands would silently disagree with
+`HEAD`). `restore.sh` assumes the target database's schema is already
+current — run the migrations first, exactly like setting up any fresh
+environment — then restores exactly the data, with
+`--disable-triggers` to skip FK re-validation during the restore
+itself (safe: the data was already valid at the source, and this
+doesn't change any of it).
+
+This is real DR discipline, not incidental — it also means a stale
+dump can never "win" against the current schema by accident the way a
+schema+data dump restored onto an older migration state could.
+
+### Verification — a real backup, a real disposable recovery, not just "the script ran"
+
+An untested backup is not a backup; the whole point of this pass was
+proving the restore path actually works, not just that `pg_dump` exits
+0.
+
+1. Ran `backup.sh` for real against the live dev database (56K,
+   compressed) — `pg_dump` itself warned about a genuine circular FK
+   between `recipes`/`recipe_versions` needing `--disable-triggers` to
+   restore, confirming that flag in `restore.sh` isn't defensive
+   boilerplate, it's necessary for this exact schema.
+2. Spun up a genuinely fresh, disposable `postgres:16-alpine` container
+   (not the persistent dev one) — no data, no schema, nothing carried
+   over.
+3. Ran all 21 migration files against it, recreating schema and all 8
+   least-privilege roles from scratch.
+4. Ran `restore.sh` against that freshly-migrated, still-empty-of-data
+   container — restored cleanly, no errors.
+5. Compared row counts, table by table, between the restored database
+   and the live source it was backed up from
+   (`purchase_orders`/`goods_receipts`/`customers`/`vehicles`/
+   `employees`/`journal_entries`/`recipes`) — every single one matched
+   exactly.
+6. **The real proof**: started an actual `procurement-service` instance
+   pointed at the restored database (a scratch port, `DATABASE_URL`
+   aimed at the disposable container) and hit its real
+   `GET /purchase-orders` endpoint with a real Keycloak-authenticated
+   request — got real business data back (`PO-2026-00001`, `OPEN`,
+   among 10 real purchase orders), served through the actual
+   application code path, not a `SELECT count(*)` standing in for "the
+   app can use this." Confirms the restored database isn't just
+   byte-identical rows sitting in tables — it's genuinely usable by a
+   running service.
+7. Cleaned up the disposable container and scratch service instance
+   afterward; confirmed the port was actually freed, not just that the
+   `pkill` command returned success.
+
+### Known gaps after this pass
+
+- On-demand only — no scheduled/automated backups. A dev stack that
+  isn't running unattended 24/7 has less need for this than a real
+  deployment would, and adding a cron sidecar now would be exactly the
+  kind of speculative always-on infrastructure this pass deliberately
+  scoped away from.
+- No off-host copy — `infra/.backups/` is still on the same disk as
+  `infra/.pgdata/` itself. A real deployment needs backups shipped
+  somewhere else entirely (object storage, a different region/host) to
+  actually survive the failure modes backups exist for; this local
+  dump-file mechanism doesn't attempt that.
+- Restore is scoped to "recover into an empty, freshly-migrated
+  database," not "merge a backup on top of already-live data" — a
+  harder, higher-stakes operation (conflict resolution, partial
+  restores, point-in-time selection) this pass didn't try to solve
+  generically. `restore.sh`'s own header comment says as much.
+- The 5 migration files that mix schema DDL with reference-data
+  `INSERT`s (`008_manufacturing.sql`, `010_sales_agent_capital.sql`,
+  `014_accounting.sql`, `017_fleet.sql`, `019_hr_payroll.sql`) mean a
+  full-database restore could in principle hit a primary-key conflict
+  on those specific reference rows if the dump also captured them —
+  didn't happen in this pass's real test (the restored dump apparently
+  didn't collide with the migration-seeded rows), but isn't
+  structurally guaranteed against for every possible future migration;
+  worth knowing about rather than assuming away.
+- Not part of `.github/workflows/ci.yml` — same reasoning as every
+  other dev-stack infra pass; this is an operational script, not
+  something the automated test suite exercises on every push.

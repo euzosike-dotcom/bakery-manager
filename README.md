@@ -450,6 +450,30 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `M2MAuthMiddleware`, real database state change, not a mocked
   assertion). See docs/RUNBOOK.md's "NestJS 10→11 migration" section for
   the full trail.
+- **Backup/restore is on-demand and proven, not continuous.**
+  `infra/postgres/backup.sh`/`restore.sh` run `pg_dump`/`pg_restore`
+  inside the running postgres container (no local psql client needed).
+  Deliberately data-only, not schema+data — schema already has a
+  canonical source of truth (`infra/postgres/migrations/*.sql`), so
+  baking a second copy into every dump would just be something else that
+  can drift out of sync with it; `restore.sh` expects the target
+  database's schema to already be current (run the migrations first,
+  same as any fresh environment setup). Verified as a real recovery, not
+  just "the script exited 0": backed up the live dev database, spun up a
+  genuinely fresh disposable Postgres container with no data or schema,
+  ran all 21 migrations to recreate schema and every least-privilege
+  role from scratch, restored the backup into it, confirmed row counts
+  matched exactly table-by-table against the source, then started an
+  actual `procurement-service` instance pointed at the restored database
+  and pulled real purchase orders back through its real API with a real
+  Keycloak token — proof the restored data is genuinely usable by a
+  running service, not just present in tables. No scheduled/automated
+  backups and no off-host copy (`infra/.backups/` sits on the same disk
+  as the data it backs up) — a real production DR story (continuous WAL
+  archiving, point-in-time recovery, off-host retention) depends on
+  whichever hosting target this eventually runs on, same "known, not
+  solved yet" treatment as the missing secrets manager. See
+  docs/RUNBOOK.md's "Backup & restore" section for the full trail.
 - **Observability now covers health checks, structured logs, correlation
   ids, and a real Prometheus + Grafana stack — but still no alerting,
   tracing, or log aggregation.** Every backend service (all 8 Node
@@ -530,9 +554,11 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `roleCode`/`x-role-code` field (confirmed by grep the whole way
   through: no authorization logic anywhere ever read it — role is always
   resolved by a DB join from `userId`). `TenantContextMiddleware` itself
-  is still there, deliberately, for exactly one route — see the
-  "Known gaps" bullet above. See `docs/RUNBOOK.md`'s four "Keycloak auth
-  retrofit" sections for the complete verification trail, including two
+  was later deleted outright once the machine-to-machine auth pass gave
+  its one remaining route (governance-service's `/authorization-check`/
+  `/approval-check`) a real replacement — see the "Known gaps" bullet
+  above. See `docs/RUNBOOK.md`'s four "Keycloak auth retrofit" sections
+  for the complete verification trail, including two
   real bugs caught rather than shipped silently: a Phase 1 regression
   that broke the mobile Users tab, and a Phase 3 discovery that mobile
   literally could not function until Phase 2's exclusions were retired
