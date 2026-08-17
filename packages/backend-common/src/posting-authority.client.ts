@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { M2MTokenClient } from './m2m-token.client';
 import { getRequestId } from './request-context';
 
 export type PostingPermission = 'can_approve' | 'can_post' | 'can_override';
@@ -62,21 +63,30 @@ export interface ApprovalAuthorityResult {
 export class PostingAuthorityClient {
   private readonly logger = new Logger(PostingAuthorityClient.name);
 
-  constructor(private readonly governanceBaseUrl: string) {}
+  constructor(
+    private readonly governanceBaseUrl: string,
+    private readonly m2mTokenClient: M2MTokenClient,
+  ) {}
 
   /**
-   * Forwards the caller's own correlation id (see `request-context.ts`)
-   * so one inbound request's logs can be followed into governance-
-   * service's own log stream, not just within the caller — this is the
-   * platform's first and so far only synchronous service-to-service
-   * call, exactly the case correlation ids exist for. Absent outside a
-   * request context (e.g. a test calling this directly), which is fine —
+   * Attaches this service's own real machine-to-machine bearer token
+   * (docs/RUNBOOK.md's "Machine-to-machine auth" section) — proves WHICH
+   * service is calling, replacing the old plain `x-tenant-id`-only
+   * header that proved nothing. `x-tenant-id` still travels as data (the
+   * token itself carries no tenant, since a service account isn't
+   * tenant-scoped), same as before, now just gated behind that proof.
+   * Also forwards the caller's own correlation id (see
+   * `request-context.ts`) so one inbound request's logs can be followed
+   * into governance-service's own log stream — absent outside a request
+   * context (e.g. a test calling this directly), which is fine,
    * `RequestIdMiddleware` always sets one for real HTTP traffic.
    */
-  private headers(tenantId: string): Record<string, string> {
+  private async headers(tenantId: string): Promise<Record<string, string>> {
     const requestId = getRequestId();
+    const token = await this.m2mTokenClient.getToken();
     return {
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
       'x-tenant-id': tenantId,
       ...(requestId ? { 'x-request-id': requestId } : {}),
     };
@@ -87,7 +97,7 @@ export class PostingAuthorityClient {
     try {
       res = await fetch(`${this.governanceBaseUrl}/authorization-check`, {
         method: 'POST',
-        headers: this.headers(params.tenantId),
+        headers: await this.headers(params.tenantId),
         body: JSON.stringify({
           userId: params.userId,
           requiredPermission: params.requiredPermission,
@@ -127,7 +137,7 @@ export class PostingAuthorityClient {
     try {
       res = await fetch(`${this.governanceBaseUrl}/approval-check`, {
         method: 'POST',
-        headers: this.headers(params.tenantId),
+        headers: await this.headers(params.tenantId),
         body: JSON.stringify({
           userId: params.userId,
           moduleName: params.moduleName,

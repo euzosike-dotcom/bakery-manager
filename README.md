@@ -133,15 +133,32 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
 
 ## Known gaps (intentionally out of scope for now)
 
-- **No machine-to-machine auth for service-to-service calls** —
-  governance-service's `/authorization-check` (called by every other
-  service's `PostingAuthorityClient`) still trusts a plain `x-tenant-id`
-  header from a caller assumed to be another backend service on the same
-  trusted network, rather than a real client-credentials-grant token.
-  This is the ONE place in the whole platform still on the pre-Keycloak
-  header stub, and it's deliberate — see the Keycloak retrofit entry
-  below for why every user-facing route (including the Flutter mobile
-  app) is on real auth now but this single internal call was left alone.
+- **Machine-to-machine auth now covers the platform's one synchronous
+  service-to-service call.** governance-service's `/authorization-check`
+  and `/approval-check` — called by `PostingAuthorityClient` from
+  `procurement-service`, `sales-service`, `accounting-service`,
+  `fleet-service`, and `hr-service` — used to trust a plain `x-tenant-id`
+  header with zero verification of who was calling, the platform's one
+  remaining pre-Keycloak stub-auth path. Each calling service now has its
+  own confidential Keycloak client (`serviceAccountsEnabled: true`,
+  `infra/keycloak/realm-export.json`) and mints a real client-credentials
+  token (`@metrock/backend-common`'s `M2MTokenClient`, cached with a
+  30-second early-refresh margin) that governance-service's new
+  `M2MAuthMiddleware` verifies — real signature/issuer check plus the
+  token's `azp` claim checked against an explicit allow-list
+  (`M2M_ALLOWED_CLIENT_IDS`) — replacing `TenantContextMiddleware`,
+  which is now fully deleted rather than left as unreachable code.
+  `tenant_id`/`user_id` still travel as plain headers exactly as before
+  (a service-account token has no tenant of its own to assert), now
+  gated behind proof of the caller's identity instead of trusted on its
+  word alone. Verified with a real minted token passing through to real
+  business logic, a real throwaway Keycloak client with a genuinely
+  valid token correctly REJECTED for not being on the allow-list, and a
+  complete real transaction (a vendor bill payment through
+  accounting-service, `OPEN` → `PAID` in the database) exercising the
+  entire chain through actual application code, not hand-built curl
+  headers. See docs/RUNBOOK.md's "Machine-to-machine auth" section for
+  the full build and verification trail.
 - **Finance connector** (Zoho Books / QuickBooks): `integration_queue` rows
   are written by the ledger service but nothing consumes them yet — the
   actual outbound connector is a separate build.

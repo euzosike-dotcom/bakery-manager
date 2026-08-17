@@ -1,12 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import {
-  HealthModule,
-  MetricsModule,
-  RateLimitModule,
-  RequestIdMiddleware,
-  TenantContextMiddleware,
-} from '@metrock/backend-common';
+import { HealthModule, M2MAuthMiddleware, MetricsModule, RateLimitModule, RequestIdMiddleware } from '@metrock/backend-common';
 import { KeycloakAuthMiddleware } from './common/keycloak-auth.middleware';
 import { PrismaModule } from './common/prisma.module';
 import { TenantModule } from './tenant/tenant.module';
@@ -40,23 +34,25 @@ import { AuthorizationModule } from './authorization/authorization.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    // `/authorization-check` and `/approval-check` are the two remaining
-    // routes on the OLD header stub — both SERVICE-TO-SERVICE endpoints
-    // called by other backend services' `PostingAuthorityClient`
-    // (packages/backend-common) with a plain x-tenant-id header, not a
-    // user's own Bearer token. Real machine-to-machine auth
-    // (client-credentials grant, one Keycloak client per caller) is a
-    // separate, still out-of-scope story. `GET /users`' own exclusion
-    // (added for the Flutter mobile Users tab) was retired here in
-    // Phase 3 once the mobile app started sending real Bearer tokens for
-    // every call — see docs/RUNBOOK.md. `health`/`metrics` are the new
-    // ones (observability pass, docs/RUNBOOK.md) — unauthenticated on
-    // purpose. RequestIdMiddleware runs first, for everything (including
+    // `/authorization-check` and `/approval-check` are the two
+    // SERVICE-TO-SERVICE endpoints called by other backend services'
+    // `PostingAuthorityClient` (packages/backend-common), not a user's
+    // own Bearer token — `M2MAuthMiddleware` verifies a real Keycloak
+    // client-credentials token (one registered client per calling
+    // service, infra/keycloak/realm-export.json) against an allow-list
+    // (M2M_ALLOWED_CLIENT_IDS below), replacing the old
+    // `TenantContextMiddleware` plain `x-tenant-id`-header stub — see
+    // docs/RUNBOOK.md's "Machine-to-machine auth" section. `GET /users`'
+    // own exclusion (added for the Flutter mobile Users tab) was retired
+    // here in Phase 3 once the mobile app started sending real Bearer
+    // tokens for every call — see docs/RUNBOOK.md. `health`/`metrics`
+    // are the observability pass's ones — unauthenticated on purpose.
+    // RequestIdMiddleware runs first, for everything (including
     // authorization-check/approval-check, so a request-id forwarded by
     // another service's PostingAuthorityClient is honored rather than
     // overwritten — see request-id.middleware.ts).
     consumer.apply(RequestIdMiddleware).forRoutes('*');
-    consumer.apply(TenantContextMiddleware).forRoutes('authorization-check', 'approval-check');
+    consumer.apply(M2MAuthMiddleware).forRoutes('authorization-check', 'approval-check');
     consumer
       .apply(KeycloakAuthMiddleware)
       .exclude('authorization-check', 'approval-check', 'health', 'metrics')

@@ -114,3 +114,55 @@ export async function verifyKeycloakToken(
     email: payload['email'] as string | undefined,
   };
 }
+
+/**
+ * Verifies a Keycloak client-credentials-grant token — the platform's
+ * machine-to-machine auth (docs/RUNBOOK.md's "Machine-to-machine auth"
+ * section), replacing `TenantContextMiddleware`'s old plain `x-tenant-id`
+ * header stub as the thing that proves a caller hitting governance-
+ * service's `/authorization-check`/`/approval-check` really is one of
+ * the platform's own backend services, not just anyone who can reach the
+ * port.
+ *
+ * Deliberately a SEPARATE function from `verifyKeycloakToken` above
+ * rather than one function branching on token shape: a service-account
+ * token has no `tenant_id`/`local_user_id` claims at all (those are
+ * USER attributes, set at provisioning time by
+ * `infra/keycloak/seed-users.sh` — a Keycloak service account is a
+ * synthetic identity with no such attributes), so requiring them the way
+ * `verifyKeycloakToken` does would reject every valid M2M token. What
+ * this DOES verify is signature + issuer (same JWKS mechanism, same
+ * `getSigningKey` cache) and that the token actually carries an `azp`
+ * (authorized party — the client id, standard OIDC claim for a
+ * client-credentials grant) identifying WHICH service is calling. It is
+ * the CALLER's job (`M2MAuthMiddleware`) to check that client id against
+ * an allow-list — this function only proves the token is genuine and
+ * says who issued it, not that the caller is expected.
+ */
+export async function verifyM2MToken(token: string, opts: KeycloakAuthOptions): Promise<{ clientId: string }> {
+  const decoded = jwt.decode(token, { complete: true });
+  if (!decoded || typeof decoded.payload === 'string' || !decoded.header.kid) {
+    throw new UnauthorizedException('Malformed bearer token');
+  }
+
+  let publicKey: string;
+  try {
+    publicKey = await getSigningKey(opts.issuer, decoded.header.kid);
+  } catch {
+    throw new UnauthorizedException('Unable to resolve token signing key');
+  }
+
+  let payload: jwt.JwtPayload;
+  try {
+    payload = jwt.verify(token, publicKey, { issuer: opts.issuer, algorithms: ['RS256'] }) as jwt.JwtPayload;
+  } catch (err) {
+    throw new UnauthorizedException(`Invalid bearer token: ${(err as Error).message}`);
+  }
+
+  const clientId = (payload['azp'] ?? payload['client_id']) as string | undefined;
+  if (!clientId) {
+    throw new UnauthorizedException('Token missing azp/client_id claim — not a client-credentials token');
+  }
+
+  return { clientId };
+}

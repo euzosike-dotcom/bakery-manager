@@ -90,6 +90,71 @@
       },
       "defaultClientScopes": ["tenant"],
       "optionalClientScopes": ["offline_access"]
+    },
+    {
+      "clientId": "procurement-service",
+      "name": "procurement-service (machine-to-machine, client-credentials grant)",
+      "description": "Real M2M auth for PostingAuthorityClient's calls to governance-service's /authorization-check and /approval-check (docs/RUNBOOK.md) — replaces the old plain x-tenant-id header stub. Client id doubles as the token's azp claim, which governance-service checks against its caller allow-list.",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "procurement-service-m2m-dev-secret"
+    },
+    {
+      "clientId": "sales-service",
+      "name": "sales-service (machine-to-machine, client-credentials grant)",
+      "description": "Real M2M auth for PostingAuthorityClient's calls to governance-service's /authorization-check and /approval-check (docs/RUNBOOK.md) — replaces the old plain x-tenant-id header stub. Client id doubles as the token's azp claim, which governance-service checks against its caller allow-list.",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "sales-service-m2m-dev-secret"
+    },
+    {
+      "clientId": "accounting-service",
+      "name": "accounting-service (machine-to-machine, client-credentials grant)",
+      "description": "Real M2M auth for PostingAuthorityClient's calls to governance-service's /authorization-check and /approval-check (docs/RUNBOOK.md) — replaces the old plain x-tenant-id header stub. Client id doubles as the token's azp claim, which governance-service checks against its caller allow-list.",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "accounting-service-m2m-dev-secret"
+    },
+    {
+      "clientId": "fleet-service",
+      "name": "fleet-service (machine-to-machine, client-credentials grant)",
+      "description": "Real M2M auth for PostingAuthorityClient's calls to governance-service's /authorization-check and /approval-check (docs/RUNBOOK.md) — replaces the old plain x-tenant-id header stub. Client id doubles as the token's azp claim, which governance-service checks against its caller allow-list.",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "fleet-service-m2m-dev-secret"
+    },
+    {
+      "clientId": "hr-service",
+      "name": "hr-service (machine-to-machine, client-credentials grant)",
+      "description": "Real M2M auth for PostingAuthorityClient's calls to governance-service's /authorization-check and /approval-check (docs/RUNBOOK.md) — replaces the old plain x-tenant-id header stub. Client id doubles as the token's azp claim, which governance-service checks against its caller allow-list.",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "hr-service-m2m-dev-secret"
     }
   ],
   "components": {

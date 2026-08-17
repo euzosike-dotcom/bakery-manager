@@ -3655,3 +3655,163 @@ default `admin`/`admin`, not a real secret, same reasoning.
 - Not part of `.github/workflows/ci.yml` — same reasoning as every other
   dev-stack infra pass; nothing in the automated test suite exercises
   `/health`/`/metrics` or the Prometheus/Grafana containers.
+
+## Machine-to-machine auth
+
+Closed the platform's one remaining stub-auth path: governance-service's
+`/authorization-check` and `/approval-check` — called by
+`PostingAuthorityClient` from `procurement-service`, `sales-service`,
+`accounting-service`, `fleet-service`, and `hr-service` — used to trust a
+plain `x-tenant-id` header with zero verification of who was actually
+calling. Everything ELSE in the platform, including every user-facing
+route, already verified a real Keycloak token; this was the single
+exception, and its own doc comment said as much (`TenantContextMiddleware`:
+"this class now has exactly one caller left in the whole platform").
+
+Unlike TLS/observability/secrets, this gap didn't split into a
+narrower-vs-broader scope choice — one architectural seam (one call
+pattern, two endpoints, five callers), so there was no smaller slice to
+carve off; fixing it meant fixing it completely.
+
+### 1. Five Keycloak service-account clients
+
+`infra/keycloak/realm-export.json` gained one confidential client per
+calling service (`procurement-service`, `sales-service`,
+`accounting-service`, `fleet-service`, `hr-service`) — `publicClient:
+false`, `serviceAccountsEnabled: true`, no redirect URIs (not a browser
+flow), a well-known dev secret (`<service>-m2m-dev-secret`) following the
+same "documented non-secret local default, override via a real
+deployment's secrets manager" pattern the "Secrets in production"
+section above established. The client id doubles as the value Keycloak
+stamps into the `azp` claim of any token it mints — that's what
+governance-service checks against its allow-list, not a separate role or
+scope.
+
+### 2. `packages/backend-common`'s new M2M primitives
+
+- **`keycloak-auth.ts`'s `verifyM2MToken`** — a deliberately SEPARATE
+  function from `verifyKeycloakToken`, not a branch inside it. A
+  service-account token carries no `tenant_id`/`local_user_id` (those
+  are USER attributes, set at provisioning time by
+  `infra/keycloak/seed-users.sh`; a service account is a synthetic
+  identity with none), so requiring them the way `verifyKeycloakToken`
+  does would reject every valid M2M token. This verifies signature +
+  issuer (same JWKS client/cache as the user-token path) and extracts
+  `azp` (falling back to `client_id`) — proving the token is genuine and
+  naming who issued it, nothing more; checking that name against an
+  allow-list is the CALLER's job.
+- **`m2m-token.client.ts`'s `M2MTokenClient`** — mints and caches a
+  client-credentials-grant token for one service's own registered
+  client, re-minting only within 30 seconds of expiry (Keycloak's
+  client-credentials default lifetime is 5 minutes) — the same
+  early-refresh margin `AuthClient` uses on the Flutter side
+  (`getValidAccessToken`), so a burst of calls doesn't mint a token per
+  request.
+- **`m2m-auth.middleware.ts`'s `M2MAuthMiddleware`** — replaces
+  `TenantContextMiddleware` in front of governance-service's two
+  service-to-service routes. Verifies the bearer token
+  (`verifyM2MToken`), checks its `azp` against
+  `M2M_ALLOWED_CLIENT_IDS` (comma-separated, governance-service's own
+  `.env` — not shared globally, this is specifically "who am I willing
+  to accept calls from"), THEN populates `req.tenantContext` from
+  `x-tenant-id`/`x-user-id`/`x-device-id` exactly like
+  `TenantContextMiddleware` used to — that data still travels as plain
+  headers (a service-account token has no tenant of its own to assert;
+  it authenticates WHICH SERVICE is calling, not a user or tenant), now
+  just gated behind proof of the caller's identity instead of trusted on
+  its word alone. No constructor dependencies, like the shared
+  `KeycloakAuthMiddleware` — reads both env vars directly, so
+  `consumer.apply(M2MAuthMiddleware)` needs no factory provider.
+- **`posting-authority.client.ts`** — `PostingAuthorityClient` now takes
+  an `M2MTokenClient` as a second constructor arg; its `headers()`
+  helper (already forwarding the caller's correlation id, from the
+  observability pass) became `async` and attaches
+  `Authorization: Bearer <token>` alongside the still-present
+  `x-tenant-id`.
+
+### 3. `TenantContextMiddleware` — deleted, not deprecated
+
+Once `M2MAuthMiddleware` took over its one remaining caller, the class
+had zero callers left anywhere in the platform — removed outright rather
+than left as unreachable code with a comment explaining why nobody calls
+it. The `TenantContext` interface and its Express `Request` augmentation
+stayed (still genuinely used — by `M2MAuthMiddleware`, by
+`@CurrentTenant()`, by `AuthorizationService`), so `tenant-context.middleware.ts`
+keeps its name and its exports, just without the middleware class that
+originally justified the filename.
+
+### 4. Wiring — five calling services, one receiving service
+
+Each calling service's `common/governance.module.ts` (or, for
+`procurement-service`, its inline factory provider — it has no
+`governance.module.ts` wrapper) now builds an `M2MTokenClient` from
+`KEYCLOAK_ISSUER` (already set, reused as-is — the SAME issuer every
+service already verifies USER tokens against, so a minted M2M token's
+`iss` automatically matches what governance-service expects, no new
+issuer config needed) plus two new env vars, `M2M_CLIENT_ID` and
+`M2M_CLIENT_SECRET`, and passes it into `PostingAuthorityClient`.
+`governance-service/.env` gained `M2M_ALLOWED_CLIENT_IDS` — the five
+client ids, comma-separated. This required the same full clean reinstall
+(`rm -rf node_modules package-lock.json && npm install`) per consuming
+service already established as this monorepo's standing playbook for
+any backend-common dependency/export change.
+
+### 5. Verification — real tokens, a real allow-list bypass attempt, a real transaction
+
+- `curl` with no `Authorization` header → real `401`; with a
+  syntactically-garbage bearer token → real `401`.
+- Minted a real client-credentials token for `procurement-service`
+  (`grant_type=client_credentials` against the actual HTTPS Keycloak
+  listener) and sent it → passed the auth layer (reached real business
+  logic, which itself 500'd on a deliberately fake tenant id — the same
+  downstream error the observability pass used to prove correlation-id
+  propagation, here repurposed to prove this request got PAST
+  `M2MAuthMiddleware` rather than being rejected by it).
+- **Allow-list bypass attempt, not just "does auth work at all"**:
+  registered a throwaway sixth Keycloak client
+  (`not-a-real-backend-service`, real `serviceAccountsEnabled: true`,
+  genuinely mintable token, real valid signature) NOT on
+  `M2M_ALLOWED_CLIENT_IDS`, minted a real token for it, and confirmed
+  governance-service rejected it with a real `403` naming the rejected
+  client — proving the allow-list is actually enforced, not just that
+  token verification works. Deleted the throwaway client afterward.
+- **A real, complete business transaction**, not a synthetic curl
+  simulating one: recorded a real payment against a seeded OPEN vendor
+  bill through `accounting-service` (a real user's Keycloak token,
+  `POST /vendor-bills/:billId/payments`) — this only succeeds if
+  `BillsService` → `PostingAuthorityClient` → `M2MTokenClient` (mint) →
+  governance-service's `M2MAuthMiddleware` (verify + allow-list) →
+  `AuthorizationService.checkAuthority` (the real can_post decision) all
+  worked, in that exact order, through the ACTUAL code path — not
+  hand-constructed headers. The bill's status flipped from `OPEN` to
+  `PAID` in the database, real proof, not a mocked assertion.
+- Confirmed no regression on governance-service's unrelated user-facing
+  routes (`GET /plants` with a real Bearer token still `200`s, still
+  `401`s with none) — this pass touched shared middleware ordering in
+  `AppModule.configure()`, worth checking nothing else moved.
+- All 50 existing Jest tests across the 6 touched services (governance,
+  procurement, sales, accounting, fleet, hr) still pass unmodified —
+  they mock `PostingAuthorityClient` at the boundary, so the M2M token
+  change is invisible to them, as it should be.
+
+### Known gaps after this pass
+
+- `M2M_ALLOWED_CLIENT_IDS` is governance-service's own env var, manually
+  kept in sync with which Keycloak clients actually exist — nothing
+  automatically derives one from the other.
+- The 5 new client secrets follow the same "well-known local dev
+  default, real deployment rotates via a secrets manager" story as every
+  other credential in this repo (see "Secrets in production" above) —
+  not yet parameterized the SQL-migration way (`psql -v` with a
+  same-as-before fallback); these live in realm-export.json as literals
+  and each service's own gitignored `.env`, matching how `metrock-mobile`
+  and `metrock-test-client` are already defined in the same file.
+- No token refresh/retry hardening beyond `M2MTokenClient`'s own 30-second
+  early-refresh margin — `PostingAuthorityClient`'s own doc comment
+  already flags "no circuit breaker, retry, or explicit timeout" as an
+  accepted gap for this one synchronous call, unchanged by this pass.
+- Not part of `.github/workflows/ci.yml` — same reasoning as the other
+  infra passes; nothing in the automated test suite mints a real
+  Keycloak token end-to-end (Phase 1-2's mocked unit tests stub
+  `PostingAuthorityClient` entirely, Phase 3's real-Postgres integration
+  tests don't touch governance-service).

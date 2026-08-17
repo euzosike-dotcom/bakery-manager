@@ -12,3 +12,5 @@ export * from './request-id.middleware';
 export * from './structured-logger';
 export * from './health.controller';
 export * from './metrics.module';
+export * from './m2m-token.client';
+export * from './m2m-auth.middleware';
