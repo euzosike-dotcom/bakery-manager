@@ -1,5 +1,7 @@
 import { FinanceConnectorService } from './finance-connector.service';
 import { PrismaService } from '../common/prisma.service';
+import { ConnectorRegistry } from '../connectors/connector-registry';
+import { ConnectorStrategy } from '../connectors/connector-strategy';
 
 const TENANT = 'tenant-1';
 
@@ -10,11 +12,18 @@ function makePrisma(tx: Record<string, unknown>, tenants: Array<{ tenantId: stri
   } as unknown as PrismaService;
 }
 
+function makeConnectors(strategy: Partial<ConnectorStrategy> = {}): ConnectorRegistry {
+  const post = jest.fn().mockResolvedValue({ postedExternalId: 'CUSTOM-generated-id' });
+  const fake: ConnectorStrategy = { externalSystem: 'CUSTOM_MODULE', post, ...strategy };
+  return { get: jest.fn().mockReturnValue(fake) } as unknown as ConnectorRegistry;
+}
+
 const QUEUE_ROW = {
   queueId: 'queue-1',
   sourceModule: 'ACCOUNTING',
   sourceRecordId: 'journal-entry-1',
   transactionType: 'MANUAL_JOURNAL_ENTRY',
+  externalSystem: 'CUSTOM_MODULE',
   retryCount: 0,
 };
 
@@ -30,9 +39,6 @@ const JOURNAL_ENTRY = {
 function makeTx(overrides: Record<string, unknown> = {}) {
   return {
     journalEntry: { findUnique: jest.fn().mockResolvedValue(JOURNAL_ENTRY) },
-    externalLedgerPosting: {
-      upsert: jest.fn().mockImplementation(({ create }) => Promise.resolve(create)),
-    },
     integrationQueue: {
       findMany: jest.fn().mockResolvedValue([QUEUE_ROW]),
       update: jest.fn().mockResolvedValue(undefined),
@@ -43,68 +49,62 @@ function makeTx(overrides: Record<string, unknown> = {}) {
 }
 
 describe('FinanceConnectorService.pollAllTenants', () => {
-  it('polls only tenants configured for the CUSTOM_MODULE connector, and processes each one', async () => {
+  it('polls every tenant with ANY connector configured (not just CUSTOM_MODULE), and processes each one', async () => {
     const tx = makeTx();
     const prisma = makePrisma(tx, [{ tenantId: TENANT }]);
-    const service = new FinanceConnectorService(prisma);
+    const service = new FinanceConnectorService(prisma, makeConnectors());
 
     await service.pollAllTenants();
 
     expect(prisma.tenantRegistry.findMany).toHaveBeenCalledWith({
-      where: { financeConnectorType: 'CUSTOM_MODULE' },
+      where: { financeConnectorType: { not: 'NONE' } },
       select: { tenantId: true },
     });
     expect(tx.integrationQueue.findMany).toHaveBeenCalled();
   });
 });
 
-describe('FinanceConnectorService.processQueueRow — happy path', () => {
-  it('builds lines_json from the journal entry, records the posting, and marks the queue row POSTED', async () => {
+describe('FinanceConnectorService.pollTenant — query shape', () => {
+  it('queries PENDING rows for any real external_system, not one hardcoded connector type', async () => {
     const tx = makeTx();
     const prisma = makePrisma(tx);
-    const service = new FinanceConnectorService(prisma);
+    const service = new FinanceConnectorService(prisma, makeConnectors());
 
     await service.pollTenant(TENANT);
 
-    expect(tx.externalLedgerPosting.upsert).toHaveBeenCalledWith(
+    expect(tx.integrationQueue.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { queueStatus: 'PENDING', externalSystem: { not: 'NONE' } } }),
+    );
+  });
+});
+
+describe('FinanceConnectorService.processQueueRow — happy path', () => {
+  it('looks up the connector matching the row\'s own external_system, builds the entry for posting, and marks the queue row POSTED with the returned id', async () => {
+    const tx = makeTx();
+    const prisma = makePrisma(tx);
+    const connectors = makeConnectors();
+    const service = new FinanceConnectorService(prisma, connectors);
+
+    await service.pollTenant(TENANT);
+
+    expect(connectors.get).toHaveBeenCalledWith('CUSTOM_MODULE');
+    const strategy = connectors.get('CUSTOM_MODULE');
+    expect(strategy.post).toHaveBeenCalledWith(
+      TENANT,
+      expect.objectContaining({ queueId: 'queue-1' }),
       expect.objectContaining({
-        where: { tenantId_queueId: { tenantId: TENANT, queueId: 'queue-1' } },
-        create: expect.objectContaining({
-          journalEntryId: 'journal-entry-1',
-          linesJson: [
-            { accountCode: '5100', debitAmount: '30000.00', creditAmount: '0.00', costCenterPlantId: null },
-            { accountCode: '1000', debitAmount: '0.00', creditAmount: '30000.00', costCenterPlantId: null },
-          ],
-        }),
+        journalEntryId: 'journal-entry-1',
+        lines: [
+          { accountCode: '5100', debitAmount: '30000.00', creditAmount: '0.00', costCenterPlantId: null },
+          { accountCode: '1000', debitAmount: '0.00', creditAmount: '30000.00', costCenterPlantId: null },
+        ],
       }),
     );
     expect(tx.integrationQueue.update).toHaveBeenCalledWith({
       where: { tenantId_queueId: { tenantId: TENANT, queueId: 'queue-1' } },
-      data: { queueStatus: 'POSTED', postedExternalId: expect.stringMatching(/^CUSTOM-/) },
+      data: { queueStatus: 'POSTED', postedExternalId: 'CUSTOM-generated-id' },
     });
     expect(tx.failedPostingReview.create).not.toHaveBeenCalled();
-  });
-
-  it('is idempotent: when the row was already synced by a prior crashed attempt, the queue is marked POSTED with the ALREADY-STORED external id, not a freshly generated one', async () => {
-    // Simulates upsert hitting its update branch (row already exists) —
-    // the real DB would return the pre-existing row untouched by `update:
-    // {}`, not the newly-generated `create` payload this test's default
-    // mock stands in for.
-    const alreadyStoredId = 'CUSTOM-already-synced-id';
-    const tx = makeTx({
-      externalLedgerPosting: {
-        upsert: jest.fn().mockResolvedValue({ postedExternalId: alreadyStoredId }),
-      },
-    });
-    const prisma = makePrisma(tx);
-    const service = new FinanceConnectorService(prisma);
-
-    await service.pollTenant(TENANT);
-
-    expect(tx.integrationQueue.update).toHaveBeenCalledWith({
-      where: { tenantId_queueId: { tenantId: TENANT, queueId: 'queue-1' } },
-      data: { queueStatus: 'POSTED', postedExternalId: alreadyStoredId },
-    });
   });
 });
 
@@ -114,7 +114,7 @@ describe('FinanceConnectorService.processQueueRow — failure and retry escalati
       journalEntry: { findUnique: jest.fn().mockResolvedValue(null) },
     });
     const prisma = makePrisma(tx);
-    const service = new FinanceConnectorService(prisma);
+    const service = new FinanceConnectorService(prisma, makeConnectors());
 
     await service.pollTenant(TENANT);
 
@@ -123,6 +123,22 @@ describe('FinanceConnectorService.processQueueRow — failure and retry escalati
       data: { retryCount: 1, lastErrorMessage: expect.stringContaining('journal_entries row not found') },
     });
     expect(tx.failedPostingReview.create).not.toHaveBeenCalled();
+  });
+
+  it('a failure inside the connector itself (e.g. an unimplemented provider) escalates through the same retry path as a missing journal entry', async () => {
+    const tx = makeTx();
+    const prisma = makePrisma(tx);
+    const failingConnectors = makeConnectors({
+      post: jest.fn().mockRejectedValue(new Error('No connector implementation exists for external_system=ZOHO_BOOKS yet.')),
+    });
+    const service = new FinanceConnectorService(prisma, failingConnectors);
+
+    await service.pollTenant(TENANT);
+
+    expect(tx.integrationQueue.update).toHaveBeenCalledWith({
+      where: { tenantId_queueId: { tenantId: TENANT, queueId: 'queue-1' } },
+      data: { retryCount: 1, lastErrorMessage: expect.stringContaining('No connector implementation exists') },
+    });
   });
 
   it('escalates to FAILED and opens a failed_posting_review row once retry_count reaches the max', async () => {
@@ -134,7 +150,7 @@ describe('FinanceConnectorService.processQueueRow — failure and retry escalati
       },
     });
     const prisma = makePrisma(tx);
-    const service = new FinanceConnectorService(prisma);
+    const service = new FinanceConnectorService(prisma, makeConnectors());
 
     await service.pollTenant(TENANT);
 

@@ -4214,12 +4214,14 @@ Against the actual dev database, not mocks:
 
 ### Known gaps after this pass
 
-- Single connector type wired up end-to-end (`CUSTOM_MODULE`) — `ZOHO_
-  BOOKS`/`QUICKBOOKS`/`XERO`/`SAP` remain valid `tenant_registry` values
-  for a future real tenant, but no actual connector logic exists for any
-  of them; a tenant configured with one today would queue rows forever
-  with nothing to consume them, exactly the bug this pass just fixed for
-  `CUSTOM_MODULE`.
+- Single connector type actually WORKS end-to-end (`CUSTOM_MODULE`) —
+  `ZOHO_BOOKS`/`QUICKBOOKS`/`XERO`/`SAP` are now pluggable (see "Finance
+  connector — a pluggable framework, not four new integrations" below)
+  rather than silently unconsumed, but none has a real implementation; a
+  tenant configured with one fails loudly and specifically instead of
+  queuing forever with nothing to consume it (the ORIGINAL bug this pass
+  fixed for `CUSTOM_MODULE`) — a real improvement, but still not a
+  working integration for any of the four.
 - No dead-letter reprocessing UI or API. (Closed — see "Finance
   connector dead-letter path" below.)
 - Poll interval and batch size are fixed dev-appropriate defaults
@@ -5158,3 +5160,123 @@ this pass) plus freshly forced ones of this connector's own:
   issue (a missing `posting_rules` row) has to be fixed by configuring
   the rule, and even then nothing automatically reprocesses the
   original failed event, since the Kafka message itself is gone.
+
+## Finance connector — a pluggable framework, not four new integrations
+
+Explicit user request: add Zoho Books/QuickBooks/Xero/SAP alongside the
+existing `CUSTOM_MODULE` connector. Explicit user decision on how,
+given a real constraint stated up front — this environment has no
+developer account, registered OAuth app, or sandbox credentials with
+any of the four, and every pass in this platform's history has been
+verified against something real and running, never against documented
+API shapes alone: build the pluggable seam so a real implementation can
+be dropped in later, but implement none of the four now. Writing HTTP
+client code against Zoho/QuickBooks/Xero/SAP's published request
+shapes without ever calling them for real would be exactly the kind of
+unverified code this session has consistently avoided.
+
+### 1. `ConnectorStrategy` — the seam
+
+`src/connectors/connector-strategy.ts` defines the interface: one
+`post(tenantId, row, entry)` method, returning `{postedExternalId}`.
+Deliberately runs OUTSIDE any open database transaction — the ORIGINAL
+`FinanceConnectorService` held one open across its whole
+`processQueueRow` (fine when the only real work was a local-DB
+`upsert`), but a real external connector's `post()` would make a slow
+network call, and this platform never holds a DB transaction open
+across one. `processQueueRow` now reads the journal entry in one short
+transaction, calls the connector, then records the result
+(`integration_queue.queueStatus = POSTED`) in a second short
+transaction — never one spanning both.
+
+Each implementation owns its own idempotency (the interface's own doc
+comment says why): `CustomModuleConnector` uses `external_ledger_postings`'
+`unique(tenantId, queueId)` via `upsert`, unchanged from before this
+pass, just relocated out of the poller and into its own file
+(`custom-module.connector.ts`) — this is the ONLY real implementation
+that exists. `NotImplementedConnector` (`not-implemented.connector.ts`)
+stands in for the other four: it always rejects, with a specific,
+greppable message naming which provider and why ("needs a registered
+OAuth app and real sandbox credentials... retrying will not help"), not
+a generic error — so a tenant accidentally or experimentally configured
+with one of them fails loudly and clearly through the EXISTING retry/
+dead-letter path, rather than either doing nothing or crashing
+unhelpfully.
+
+`ConnectorRegistry` (`connector-registry.ts`) maps `external_system`
+values to strategy instances — `CUSTOM_MODULE` to the real one,
+`ZOHO_BOOKS`/`QUICKBOOKS`/`XERO`/`SAP` to their own
+`NotImplementedConnector`. Adding a real provider later means writing a
+class implementing `ConnectorStrategy` and registering it here in place
+of its stub entry — `FinanceConnectorService` itself needs no further
+changes; it already just asks the registry for whatever strategy a
+row's own `external_system` names.
+
+### 2. The poller itself is no longer hardcoded to one connector type
+
+`pollAllTenants` used to query `tenant_registry WHERE
+finance_connector_type = 'CUSTOM_MODULE'` — the ONE type this service
+happened to support. Now it queries `WHERE finance_connector_type !=
+'NONE'`, and `pollTenant` queries `integration_queue WHERE queueStatus
+= 'PENDING' AND externalSystem != 'NONE'` (previously an exact match on
+`'CUSTOM_MODULE'`) — a tenant configured with ANY real connector value
+now enters the poll loop, and `processQueueRow` dispatches each row to
+whichever strategy its OWN `external_system` names (not the tenant's
+current config — see the original "Finance connector" section's
+comment on why a row's own value can outlive a tenant's config change).
+
+### 3. Verification — a real regression check, and a real (temporary) failure
+
+Against the live dev database, not mocks:
+
+1. **Regression**: after the refactor, a fresh real `CUSTOM_MODULE`
+   queue row synced exactly as before — `queue_status = POSTED`, a real
+   `CUSTOM-`-prefixed id — confirming the pluggable rewrite didn't
+   change existing, already-verified behavior.
+2. **New capability, proven, not assumed**: temporarily flipped the
+   live tenant's `finance_connector_type` to `'ZOHO_BOOKS'` and queued a
+   real row tagged the same way. Watched two real poll attempts fail
+   with the exact, specific `NotImplementedConnector` message (not a
+   generic error), then a third exhaust it into `FAILED` + a real
+   `failed_posting_review` row carrying that same specific message —
+   proving both the new dispatch-by-`external_system` logic and that an
+   unimplemented provider fails the way it's supposed to, loudly and
+   informatively.
+3. **The dead-letter guard generalizes correctly**: attempted `POST
+   /failed-postings/:id/retry` against that same `ZOHO_BOOKS` review —
+   correctly rejected with a real `400` naming `ZOHO_BOOKS` explicitly,
+   confirming the retry guard built for `ledger-service`'s `NONE`
+   failure class (the finance connector dead-letter pass above) also
+   correctly protects against retrying ANY non-`CUSTOM_MODULE` failure,
+   not just the one case it was originally tested against. Dismissed
+   the review, then restored the tenant's `finance_connector_type` back
+   to `CUSTOM_MODULE`.
+4. Jest suite: `finance-connector.service.spec.ts` (7 tests) rewritten
+   around a fake `ConnectorRegistry`/`ConnectorStrategy` rather than
+   asserting on `externalLedgerPosting.upsert` directly — that
+   assertion moved to a new, focused `custom-module.connector.spec.ts`
+   (2 tests, the exact happy-path/idempotency coverage the old combined
+   spec had, just relocated to the unit that now owns that logic). New
+   `connector-registry.spec.ts` (6 tests): `CUSTOM_MODULE` resolves to
+   the real connector, all four unimplemented providers resolve to
+   their own correctly-named `NotImplementedConnector`, an unknown
+   value throws, and `NotImplementedConnector.post` itself rejects with
+   the specific message. 21 tests total across the service, up from 5.
+
+### Known gaps after this pass
+
+- Still zero working external connectors — this pass is explicitly
+  scoped to the plumbing, not the integrations. A real Zoho Books
+  connector (the fastest of the four to get a free sandbox account for)
+  is the natural next step if real credentials ever become available.
+- `ConnectorStrategy.post` returns only `{postedExternalId}` — a real
+  provider's response likely carries more worth recording (e.g. a sync
+  URL, a warning the posting succeeded with caveats); the interface
+  would need to grow if and when a real implementation needs it, not
+  designed in speculatively now.
+- No per-connector configuration beyond `tenant_registry
+  .finance_connector_type` itself — a real Zoho/QuickBooks/Xero/SAP
+  connector would need OAuth tokens, refresh logic, and provider-
+  specific settings (which Zoho "organization," which QuickBooks
+  "company," etc.) stored somewhere; no such storage exists yet, since
+  there's nothing real to configure until a connector exists to use it.

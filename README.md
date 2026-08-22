@@ -211,6 +211,35 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   after fixing its underlying data, was picked up by the poller on its
   very next cycle and posted successfully. See `docs/RUNBOOK.md`'s
   "Finance connector dead-letter path" section for the full trail.
+- **Finance connector is now pluggable — Zoho Books/QuickBooks/Xero/SAP
+  have a real seam, not a real integration for any of them.** Explicit
+  scope decision, not an oversight: this environment has no developer
+  account, registered OAuth app, or sandbox credentials with any of the
+  four, and every pass in this platform's build has been verified
+  against something real and running, never against a provider's
+  documented API shape alone — writing untested HTTP client code against
+  four real SaaS products' published request formats would break that.
+  `finance-connector-service` gained a `ConnectorStrategy` interface
+  (`src/connectors/`) and a registry mapping each `tenant_registry
+  .finance_connector_type` value to an implementation; `CustomModuleConnector`
+  (the only real one) is the exact same logic the original build had,
+  just relocated out of the poller and into its own file so it's a
+  peer of whatever gets implemented next, not special-cased into it.
+  The other four resolve to `NotImplementedConnector`, which fails
+  loudly with a specific, greppable message naming the provider — not
+  silently, not generically — so a tenant configured with one fails
+  through the existing retry/dead-letter path instead of queuing rows
+  forever with nothing to consume them (the exact bug this whole
+  connector effort originally fixed for `CUSTOM_MODULE`). Verified for
+  real: a fresh `CUSTOM_MODULE` posting still synced correctly after the
+  refactor (no regression), and the live tenant was temporarily
+  reconfigured to `ZOHO_BOOKS` to prove the new dispatch path for
+  real — two poll attempts failed with the exact expected message, a
+  third dead-lettered it, and the dead-letter retry guard (built for a
+  different failure class entirely, `docs/RUNBOOK.md`'s dead-letter
+  section) correctly rejected retrying it too, without any change to
+  make that generalize. See `docs/RUNBOOK.md`'s "Finance connector — a
+  pluggable framework" section for the full trail.
 - **Multi-tenancy isolation tiers**: only the "Pool" tier (shared schema +
   RLS) is implemented. Schema-per-tenant ("Bridge") and database-per-tenant
   ("Silo") provisioning are not built yet.

@@ -1,9 +1,8 @@
 import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
+import { ConnectorRegistry } from '../connectors/connector-registry';
 
-const EXTERNAL_SYSTEM = 'CUSTOM_MODULE';
 const MAX_RETRIES = 3;
 const BATCH_SIZE = 20;
 
@@ -12,23 +11,27 @@ interface QueueRow {
   sourceModule: string;
   sourceRecordId: string;
   transactionType: string;
+  externalSystem: string;
   retryCount: number;
 }
 
 /**
- * The consumer side of integration_queue (005_finance.sql) — what a real
- * Zoho Books/QuickBooks connector would otherwise be, relaying postings to
- * Metrock's own custom finance module (external_ledger_postings,
- * 025_finance_connector.sql) instead of an external SaaS API.
+ * The consumer side of integration_queue (005_finance.sql) — pluggable
+ * per tenant_registry.finance_connector_type via ConnectorRegistry (see
+ * connectors/connector-strategy.ts): today that's only ever
+ * 'CUSTOM_MODULE' in practice (Metrock's own custom finance module),
+ * since Zoho Books/QuickBooks/Xero/SAP have no real implementation yet —
+ * this service itself doesn't know or care which; it just looks up
+ * whatever strategy a row's own external_system names.
  *
  * This is the first cross-tenant background job in this platform's NestJS
  * services — every other service is request-scoped by an incoming
  * x-tenant-id header, so there is no request to inherit a tenant from.
  * Instead, each poll tick enumerates tenant_registry itself for tenants
- * configured with financeConnectorType='CUSTOM_MODULE', then runs a
- * separate PrismaService.forTenant-scoped pass per tenant — the same RLS
- * session-variable mechanism every request-scoped service already uses,
- * just driven by a timer instead of a controller.
+ * with ANY connector configured (financeConnectorType != 'NONE'), then
+ * runs a separate PrismaService.forTenant-scoped pass per tenant — the
+ * same RLS session-variable mechanism every request-scoped service
+ * already uses, just driven by a timer instead of a controller.
  *
  * A plain setInterval, not @nestjs/schedule — this is the only scheduled
  * job anywhere in this codebase, so a new dependency for one timer would
@@ -43,7 +46,10 @@ export class FinanceConnectorService implements OnModuleInit, OnModuleDestroy {
     ? Number(process.env.POLL_INTERVAL_MS)
     : 5000;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly connectors: ConnectorRegistry,
+  ) {}
 
   onModuleInit() {
     this.timer = setInterval(() => {
@@ -59,7 +65,7 @@ export class FinanceConnectorService implements OnModuleInit, OnModuleDestroy {
 
   async pollAllTenants(): Promise<void> {
     const tenants = await this.prisma.tenantRegistry.findMany({
-      where: { financeConnectorType: EXTERNAL_SYSTEM },
+      where: { financeConnectorType: { not: 'NONE' } },
       select: { tenantId: true },
     });
     for (const { tenantId } of tenants) {
@@ -70,10 +76,17 @@ export class FinanceConnectorService implements OnModuleInit, OnModuleDestroy {
   async pollTenant(tenantId: string): Promise<void> {
     const pending = await this.prisma.forTenant(tenantId, (tx) =>
       tx.integrationQueue.findMany({
-        where: { queueStatus: 'PENDING', externalSystem: EXTERNAL_SYSTEM },
+        where: { queueStatus: 'PENDING', externalSystem: { not: 'NONE' } },
         orderBy: { queuedTime: 'asc' },
         take: BATCH_SIZE,
-        select: { queueId: true, sourceModule: true, sourceRecordId: true, transactionType: true, retryCount: true },
+        select: {
+          queueId: true,
+          sourceModule: true,
+          sourceRecordId: true,
+          transactionType: true,
+          externalSystem: true,
+          retryCount: true,
+        },
       }),
     );
     for (const row of pending) {
@@ -82,56 +95,47 @@ export class FinanceConnectorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * One queue row's worth of work in its own transaction, so a bad row
-   * never blocks the rest of the batch. Uses upsert (not create) against
-   * ExternalLedgerPosting's unique(tenantId, queueId) constraint so a
-   * crash between the insert and the queue-status update is self-healing
-   * on retry, rather than either double-posting or throwing a P2002 that
-   * would abort the surrounding transaction (Prisma interactive
-   * transactions don't savepoint each statement, so a caught exception
-   * inside one still leaves it unusable for further queries).
+   * One queue row's worth of work, so a bad row never blocks the rest of
+   * the batch. The connector's own `post()` runs OUTSIDE any open
+   * transaction (see ConnectorStrategy's doc comment — a real
+   * implementation may make a slow network call), so this method reads
+   * the journal entry in one short transaction, calls the connector, and
+   * records the result in a second short transaction — never one long
+   * transaction spanning the external call.
    */
   private async processQueueRow(tenantId: string, row: QueueRow): Promise<void> {
     try {
-      await this.prisma.forTenant(tenantId, async (tx) => {
-        const entry = await tx.journalEntry.findUnique({
+      const entry = await this.prisma.forTenant(tenantId, (tx) =>
+        tx.journalEntry.findUnique({
           where: { tenantId_journalEntryId: { tenantId, journalEntryId: row.sourceRecordId } },
           include: { lines: true },
-        });
-        if (!entry) {
-          throw new Error(
-            `journal_entries row not found for queue_id=${row.queueId} (source_record_id=${row.sourceRecordId})`,
-          );
-        }
+        }),
+      );
+      if (!entry) {
+        throw new Error(
+          `journal_entries row not found for queue_id=${row.queueId} (source_record_id=${row.sourceRecordId})`,
+        );
+      }
 
-        const linesJson = entry.lines.map((line) => ({
+      const strategy = this.connectors.get(row.externalSystem);
+      const result = await strategy.post(tenantId, row, {
+        journalEntryId: entry.journalEntryId,
+        sourceModule: row.sourceModule,
+        transactionType: row.transactionType,
+        lines: entry.lines.map((line) => ({
           accountCode: line.accountCode,
           debitAmount: line.debitAmount.toString(),
           creditAmount: line.creditAmount.toString(),
           costCenterPlantId: line.costCenterPlantId,
-        })) as unknown as Prisma.InputJsonValue;
-
-        const posting = await tx.externalLedgerPosting.upsert({
-          where: { tenantId_queueId: { tenantId, queueId: row.queueId } },
-          update: {},
-          create: {
-            tenantId,
-            externalPostingId: randomUUID(),
-            queueId: row.queueId,
-            sourceModule: row.sourceModule,
-            transactionType: row.transactionType,
-            journalEntryId: row.sourceRecordId,
-            linesJson,
-            postedExternalId: `CUSTOM-${randomUUID()}`,
-            receivedAt: new Date(),
-          },
-        });
-
-        await tx.integrationQueue.update({
-          where: { tenantId_queueId: { tenantId, queueId: row.queueId } },
-          data: { queueStatus: 'POSTED', postedExternalId: posting.postedExternalId },
-        });
+        })),
       });
+
+      await this.prisma.forTenant(tenantId, (tx) =>
+        tx.integrationQueue.update({
+          where: { tenantId_queueId: { tenantId, queueId: row.queueId } },
+          data: { queueStatus: 'POSTED', postedExternalId: result.postedExternalId },
+        }),
+      );
     } catch (err) {
       await this.recordFailure(tenantId, row, err);
     }
