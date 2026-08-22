@@ -43,7 +43,16 @@ VALUES
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'MANUAL_JOURNAL_ENTRY', 50000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde'),
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'FLEET', 'MAINTENANCE_COMPLETION', 0, 15000, '1a946225-e283-4bbe-9c05-939dff09a1cf'),
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'FLEET', 'MAINTENANCE_COMPLETION', 15000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde'),
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'MANUFACTURING', 'BATCH_COST', 150000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde');
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'MANUFACTURING', 'BATCH_COST', 150000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde'),
+    -- Expense Management (migration 031) — a new transaction_type under
+    -- the existing ACCOUNTING module_name, its own threshold band, not
+    -- reusing MANUAL_JOURNAL_ENTRY's: expense claims are typically
+    -- smaller-value than a manual adjustment, and the two should be free
+    -- to diverge independently. Below 20,000 a Procurement Manager can
+    -- approve alone; at or above, Finance Controller sign-off is
+    -- required. Tunable seed data, not a hardcoded business rule.
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'EXPENSE_REQUEST', 0, 20000, '1a946225-e283-4bbe-9c05-939dff09a1cf'),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'EXPENSE_REQUEST', 20000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde');
 
 INSERT INTO reason_codes (tenant_id, reason_code, reason_group, description)
 VALUES

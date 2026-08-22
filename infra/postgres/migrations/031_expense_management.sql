@@ -69,19 +69,15 @@ END $$;
 GRANT SELECT, INSERT, UPDATE ON expense_categories TO accounting_svc;
 GRANT SELECT, INSERT, UPDATE ON expense_requests TO accounting_svc;
 
--- Approval routing (docs/SDD.md §4.2) — a new transaction_type under the
--- existing ACCOUNTING module_name, its own threshold band, not reusing
--- MANUAL_JOURNAL_ENTRY's: expense claims are typically smaller-value than
--- a manual adjustment, and the two should be free to diverge independently.
--- Same two capability-having roles as every other module in this dev seed
--- (governance_seed.sql's own comment explains why: no purpose-named
--- approver roles exist in this 3-user dataset) — below 20,000 a Procurement
--- Manager can approve alone; at or above, Finance Controller sign-off is
--- required. Tunable seed data, not a hardcoded business rule.
-INSERT INTO approval_matrix (tenant_id, module_name, transaction_type, threshold_min, threshold_max, approval_level_1_role_id)
-VALUES
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'EXPENSE_REQUEST', 0, 20000, '1a946225-e283-4bbe-9c05-939dff09a1cf'),
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'EXPENSE_REQUEST', 20000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde');
+-- Approval routing (docs/SDD.md §4.2) itself is NOT seeded here — unlike
+-- chart_of_accounts/expense_categories below, an approval_matrix row
+-- needs a real role_id foreign key, which only exists in the 3-user dev
+-- dataset (dev_seed.sql), not in every environment this migration runs
+-- against (e.g. CI's clean-schema-only database). Same reasoning
+-- migrations 022/023/024 already follow: they never insert approval_
+-- matrix rows themselves either — that seed data lives in
+-- infra/postgres/seed/governance_seed.sql, alongside the equivalent
+-- Procurement/Accounting/Fleet/Manufacturing bands.
 
 -- A first, real, usable category out of the box — Office Supplies against
 -- a new EXPENSE account (no existing account fit; Vehicle Fuel/Maintenance
@@ -89,9 +85,14 @@ VALUES
 -- general-purpose category would blur two unrelated postings together in
 -- every report that reads it). More categories are ordinary application
 -- data from here — added via POST /expense-categories, not another
--- migration.
+-- migration. Both inserts use the dynamic SELECT ... FROM tenant_registry
+-- form every other migration's chart_of_accounts seeding uses (008, 010,
+-- 017, 019, 028, 029) rather than a literal tenant_id — neither needs a
+-- role_id, so unlike approval_matrix above there's no reason this can't
+-- work generically for however many tenants actually exist (zero rows
+-- inserted, not an error, when none do).
 INSERT INTO chart_of_accounts (tenant_id, account_code, account_name, account_type)
-VALUES ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '5350', 'Office Supplies Expense', 'EXPENSE');
+SELECT tenant_id, '5350', 'Office Supplies Expense', 'EXPENSE' FROM tenant_registry;
 
 INSERT INTO expense_categories (tenant_id, category_name, gl_account_code)
-VALUES ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'Office Supplies', '5350');
+SELECT tenant_id, 'Office Supplies', '5350' FROM tenant_registry;
