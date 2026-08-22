@@ -3,13 +3,6 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../data/sales_order_repository.dart';
 import 'sales_order_capture_state.dart';
 
-// Hardcoded finished-good SKU for order line entry — same simplification
-// as the other two modules' single-line capture screens (GRN pre-filled
-// from one PO's lines, batch pre-filled from one recipe's ingredients).
-// A real SKU catalog picker needs a product listing endpoint on
-// sales-service, which doesn't exist yet — natural next task.
-const _devOrderSkuId = '8558cee8-8acd-4d5a-a334-3b3dc4088512'; // BRD-500G, see manufacturing seed
-
 /// Drives sales order capture. Like the other two capture cubits,
 /// everything here is a local Drift write — no network call, works
 /// identically online or offline.
@@ -29,12 +22,14 @@ class SalesOrderCaptureCubit extends Cubit<SalesOrderCaptureState> {
     required String plantId,
     required double availableCapitalAtOpen,
     List<Map<String, dynamic>> customers = const [],
+    List<Map<String, dynamic>> productSkus = const [],
   }) : super(SalesOrderCaptureState(
           status: SalesOrderCaptureStatus.ready,
           agentId: agentId,
           plantId: plantId,
           availableCapitalAtOpen: availableCapitalAtOpen,
           customers: customers,
+          productSkus: productSkus,
         ));
 
   final SalesOrderRepository repository;
@@ -44,7 +39,29 @@ class SalesOrderCaptureCubit extends Cubit<SalesOrderCaptureState> {
   void updateCustomerId(String? customerId) =>
       emit(state.copyWith(customerId: customerId, clearCustomerId: customerId == null));
 
+  /// Selecting a SKU pre-fills unit price from its catalog `listPrice`
+  /// when one is set — a suggested starting point, not a constraint;
+  /// updateUnitPrice can still freely override it afterward (agents
+  /// negotiate real prices in the field, same as before this picker
+  /// existed — see order_lines.unit_price's own design, which was always
+  /// a free per-line field, not derived).
+  void updateSkuId(String skuId) {
+    final sku = state.productSkus.firstWhere(
+      (s) => s['skuId'] == skuId,
+      orElse: () => const <String, dynamic>{},
+    );
+    final listPrice = sku['listPrice'];
+    emit(state.copyWith(
+      skuId: skuId,
+      unitPrice: listPrice != null ? double.tryParse(listPrice.toString()) ?? state.unitPrice : state.unitPrice,
+    ));
+  }
+
   Future<void> submit() async {
+    if (state.skuId == null) {
+      emit(state.copyWith(status: SalesOrderCaptureStatus.error, errorMessage: 'Pick a product.'));
+      return;
+    }
     if (state.orderedQty <= 0 || state.unitPrice <= 0) {
       emit(state.copyWith(status: SalesOrderCaptureStatus.error, errorMessage: 'Enter a quantity and unit price.'));
       return;
@@ -55,7 +72,7 @@ class SalesOrderCaptureCubit extends Cubit<SalesOrderCaptureState> {
         agentId: state.agentId,
         plantId: state.plantId,
         customerId: state.customerId,
-        lines: [OrderLineInput(skuId: _devOrderSkuId, orderedQty: state.orderedQty, unitPrice: state.unitPrice)],
+        lines: [OrderLineInput(skuId: state.skuId!, orderedQty: state.orderedQty, unitPrice: state.unitPrice)],
       );
       emit(state.copyWith(status: SalesOrderCaptureStatus.submitted, submittedOrderId: orderId));
     } catch (e) {

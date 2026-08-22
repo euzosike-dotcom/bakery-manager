@@ -210,3 +210,18 @@ describe('ProductionService.findAllBatches — BigInt sync_seq serialization', (
     expect(() => JSON.stringify(result)).not.toThrow();
   });
 });
+
+describe('ProductionService.listProductSkus', () => {
+  it('lists only active SKUs, ordered by sku_code', async () => {
+    const findMany = jest.fn().mockResolvedValue([
+      { skuCode: 'BRD-500G', skuCategory: 'FINISHED_GOOD', listPrice: 250 },
+    ]);
+    const tx = { productSku: { findMany } };
+    const service = new ProductionService(makePrisma(tx), makeKafka(), makePostingAuthority());
+
+    const result = await service.listProductSkus(TENANT);
+
+    expect(findMany).toHaveBeenCalledWith({ where: { isActive: true }, orderBy: { skuCode: 'asc' } });
+    expect(result).toEqual([{ skuCode: 'BRD-500G', skuCategory: 'FINISHED_GOOD', listPrice: 250 }]);
+  });
+});

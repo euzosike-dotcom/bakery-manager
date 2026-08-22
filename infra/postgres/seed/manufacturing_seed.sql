@@ -5,6 +5,7 @@
 --
 -- ID reference:
 --   SKU BRD-500G (finished good, standard white bread)  8558cee8-8acd-4d5a-a334-3b3dc4088512
+--   SKU BRD-1KG (finished good, large white bread)       c1a8e6b1-4b8b-4a1c-9a3a-0f6a9e0c9c2b
 --   SKU FLR-001 (raw material, flour)                    39db8695-0360-4ae3-9d28-85472f5b270e
 --   SKU SGR-001 (raw material, sugar)                    d48dfceb-22ad-414b-a053-fde5ed84332f
 --   SKU YST-001 (raw material, yeast)                    7f7a9932-dd76-44b9-8e0a-43f4ff30d5e7
@@ -14,12 +15,20 @@
 --
 -- Run as the postgres superuser role (bypasses RLS regardless of FORCE).
 
-INSERT INTO product_skus (tenant_id, sku_id, sku_code, sku_name, sku_category, unit_of_measure, standard_weight_kg) VALUES
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '8558cee8-8acd-4d5a-a334-3b3dc4088512', 'BRD-500G', 'Standard White Bread 500g', 'FINISHED_GOOD', 'UNIT', 0.5),
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '39db8695-0360-4ae3-9d28-85472f5b270e', 'FLR-001', 'Wheat Flour', 'RAW_MATERIAL', 'KG', NULL),
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'd48dfceb-22ad-414b-a053-fde5ed84332f', 'SGR-001', 'Granulated Sugar', 'RAW_MATERIAL', 'KG', NULL),
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '7f7a9932-dd76-44b9-8e0a-43f4ff30d5e7', 'YST-001', 'Baker''s Yeast', 'RAW_MATERIAL', 'KG', NULL),
-    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '97efb0b1-9c5f-418c-a805-b6e1c0f7c316', 'SLT-001', 'Salt', 'RAW_MATERIAL', 'KG', NULL);
+-- list_price (026_product_sku_pricing.sql) is only set on the two
+-- FINISHED_GOOD rows — raw materials are never sold, so they have no
+-- selling price. BRD-500G's 250.00 sits above its recipe's standard_cost
+-- of 190.00/unit below, a plausible margin; BRD-1KG has no recipe of its
+-- own (out of scope for the pricing gap this closes — it exists purely
+-- so the Sales Order SKU picker has more than one real choice to prove
+-- itself against).
+INSERT INTO product_skus (tenant_id, sku_id, sku_code, sku_name, sku_category, unit_of_measure, standard_weight_kg, list_price) VALUES
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '8558cee8-8acd-4d5a-a334-3b3dc4088512', 'BRD-500G', 'Standard White Bread 500g', 'FINISHED_GOOD', 'UNIT', 0.5, 250.00),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'c1a8e6b1-4b8b-4a1c-9a3a-0f6a9e0c9c2b', 'BRD-1KG', 'Standard White Bread 1kg', 'FINISHED_GOOD', 'UNIT', 1.0, 480.00),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '39db8695-0360-4ae3-9d28-85472f5b270e', 'FLR-001', 'Wheat Flour', 'RAW_MATERIAL', 'KG', NULL, NULL),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'd48dfceb-22ad-414b-a053-fde5ed84332f', 'SGR-001', 'Granulated Sugar', 'RAW_MATERIAL', 'KG', NULL, NULL),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '7f7a9932-dd76-44b9-8e0a-43f4ff30d5e7', 'YST-001', 'Baker''s Yeast', 'RAW_MATERIAL', 'KG', NULL, NULL),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', '97efb0b1-9c5f-418c-a805-b6e1c0f7c316', 'SLT-001', 'Salt', 'RAW_MATERIAL', 'KG', NULL, NULL);
 
 INSERT INTO recipes (tenant_id, recipe_id, sku_id, recipe_name, recipe_status)
 VALUES ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'aa5feda0-73c5-444c-80c4-947a8d1ae503', '8558cee8-8acd-4d5a-a334-3b3dc4088512', 'Standard White Bread', 'ACTIVE');

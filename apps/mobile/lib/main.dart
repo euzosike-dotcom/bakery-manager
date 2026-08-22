@@ -250,7 +250,14 @@ class _HomeScreen extends StatelessWidget {
           children: [
             _PurchaseOrdersTab(db: db, api: procurementApi, deviceId: deviceId, sync: sync),
             _RecipesTab(db: db, api: manufacturingApi, deviceId: deviceId, sync: sync),
-            _AgentsTab(db: db, api: salesApi, crmApi: crmApi, deviceId: deviceId, sync: sync),
+            _AgentsTab(
+              db: db,
+              api: salesApi,
+              crmApi: crmApi,
+              manufacturingApi: manufacturingApi,
+              deviceId: deviceId,
+              sync: sync,
+            ),
             _CustomersTab(db: db, api: crmApi, deviceId: deviceId, sync: sync),
             _VehiclesTab(db: db, api: fleetApi, deviceId: deviceId, sync: sync),
             _EmployeesTab(db: db, api: hrApi, deviceId: deviceId, sync: sync),
@@ -528,10 +535,18 @@ class _RecipesTabState extends State<_RecipesTab> {
 const _devPlantIdFallback = 'aba294c3-c28c-43a9-a465-67ced442a487';
 
 class _AgentsTab extends StatefulWidget {
-  const _AgentsTab({required this.db, required this.api, required this.crmApi, required this.deviceId, required this.sync});
+  const _AgentsTab({
+    required this.db,
+    required this.api,
+    required this.crmApi,
+    required this.manufacturingApi,
+    required this.deviceId,
+    required this.sync,
+  });
   final AppDatabase db;
   final ApiClient api;
   final ApiClient crmApi;
+  final ApiClient manufacturingApi;
   final String deviceId;
   final SyncService sync;
 
@@ -583,7 +598,13 @@ class _AgentsTabState extends State<_AgentsTab> {
     Navigator.of(context)
         .push(
           MaterialPageRoute(
-            builder: (_) => _AgentDetailScreen(db: widget.db, crmApi: widget.crmApi, deviceId: widget.deviceId, agent: agent),
+            builder: (_) => _AgentDetailScreen(
+              db: widget.db,
+              crmApi: widget.crmApi,
+              manufacturingApi: widget.manufacturingApi,
+              deviceId: widget.deviceId,
+              agent: agent,
+            ),
           ),
         )
         .then((_) => widget.sync.syncNow());
@@ -598,9 +619,16 @@ class _AgentsTabState extends State<_AgentsTab> {
 /// an optional customer picker (CRM slice) without a fourth `ApiClient`
 /// being threaded any deeper than this screen needs it.
 class _AgentDetailScreen extends StatefulWidget {
-  const _AgentDetailScreen({required this.db, required this.crmApi, required this.deviceId, required this.agent});
+  const _AgentDetailScreen({
+    required this.db,
+    required this.crmApi,
+    required this.manufacturingApi,
+    required this.deviceId,
+    required this.agent,
+  });
   final AppDatabase db;
   final ApiClient crmApi;
+  final ApiClient manufacturingApi;
   final String deviceId;
   final Map<String, dynamic> agent;
 
@@ -610,6 +638,7 @@ class _AgentDetailScreen extends StatefulWidget {
 
 class _AgentDetailScreenState extends State<_AgentDetailScreen> {
   List<Map<String, dynamic>> _customers = [];
+  List<Map<String, dynamic>> _productSkus = [];
 
   @override
   void initState() {
@@ -617,6 +646,13 @@ class _AgentDetailScreenState extends State<_AgentDetailScreen> {
     widget.crmApi.fetchCustomers().then((c) => setState(() => _customers = c)).catchError((_) {
       // Offline at open, or crm-service unreachable — New Sales Order still
       // works, just with an empty customer picker (defaults to "None").
+    });
+    widget.manufacturingApi.fetchProductSkus().then((s) => setState(() => _productSkus = s)).catchError((_) {
+      // Offline at open, or manufacturing-service unreachable — New Sales
+      // Order still opens, just with an empty product picker; submit()
+      // requires a SKU to be picked, so the agent simply can't submit
+      // until connectivity returns, same tradeoff as every other
+      // online-only master-data list in this app.
     });
   }
 
@@ -644,6 +680,7 @@ class _AgentDetailScreenState extends State<_AgentDetailScreen> {
                       plantId: _devPlantIdFallback,
                       availableCapitalAtOpen: availableCapital,
                       customers: _customers,
+                      productSkus: _productSkus,
                     ),
                     child: const SalesOrderCaptureScreen(),
                   ),

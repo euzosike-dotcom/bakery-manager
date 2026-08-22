@@ -56,6 +56,17 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// The SKU catalog (with `listPrice` where set), for the Sales Order
+  /// capture picker — replaces what used to be a hardcoded single SKU with
+  /// a free-text price (README "Known gaps"). Same online-only
+  /// simplification as fetchRecipes: called against manufacturing-service,
+  /// the table's owner, not sales-service.
+  Future<List<Map<String, dynamic>>> fetchProductSkus() async {
+    final res = await _client.get(Uri.parse('$baseUrl/product-skus'), headers: await _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
   /// Agents with live-computed capital status — same online-only
   /// simplification as fetchPurchaseOrders/fetchRecipes. `availableCapital`
   /// here is a snapshot at fetch time for display only; it is NOT what

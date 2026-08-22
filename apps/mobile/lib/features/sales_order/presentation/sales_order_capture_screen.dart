@@ -60,6 +60,34 @@ class SalesOrderCaptureScreen extends StatelessWidget {
                       ],
                       onChanged: (v) => context.read<SalesOrderCaptureCubit>().updateCustomerId(v),
                     ),
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String?>(
+                      initialValue: state.skuId,
+                      // Product names + prices can be longer than the field
+                      // is wide (e.g. "BRD-1KG — Standard White Bread 1kg
+                      // (480)") — without isExpanded the button sizes to its
+                      // widest item's intrinsic width and overflows the
+                      // available row width instead of truncating.
+                      isExpanded: true,
+                      decoration: const InputDecoration(labelText: 'Product'),
+                      items: state.productSkus
+                          .where((s) => s['skuCategory'] == 'FINISHED_GOOD')
+                          .map(
+                            (s) => DropdownMenuItem<String?>(
+                              value: s['skuId'] as String,
+                              child: Text(
+                                s['listPrice'] != null
+                                    ? '${s['skuCode']} — ${s['skuName']} (${s['listPrice']})'
+                                    : '${s['skuCode']} — ${s['skuName']}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) {
+                        if (v != null) context.read<SalesOrderCaptureCubit>().updateSkuId(v);
+                      },
+                    ),
                     const SizedBox(height: 24),
                     TextFormField(
                       decoration: const InputDecoration(labelText: 'Ordered quantity (units)'),
@@ -69,6 +97,13 @@ class SalesOrderCaptureScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 16),
                     TextFormField(
+                      // Re-keyed on the selected SKU so picking a new
+                      // product refreshes the displayed initialValue to
+                      // its listPrice pre-fill (TextFormField.initialValue
+                      // is otherwise only honored on first build) — the
+                      // agent can still type over it freely afterward.
+                      key: ValueKey(state.skuId),
+                      initialValue: state.unitPrice > 0 ? state.unitPrice.toString() : null,
                       decoration: const InputDecoration(labelText: 'Unit price'),
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
                       onChanged: (v) =>

@@ -40,6 +40,19 @@ export class ProductionService {
     );
   }
 
+  // The SKU catalog other modules pick from — see sales-service's Sales
+  // Order capture, whose picker was a hardcoded single SKU with a free-
+  // text price before this (README "Known gaps"). Every SKU, not just
+  // FINISHED_GOOD — raw materials are useful catalog data too (e.g. a
+  // future Procurement picker), and filtering to one category is a
+  // trivial client-side concern for a handful of rows, not worth a query
+  // param here.
+  listProductSkus(tenantId: string) {
+    return this.prisma.forTenant(tenantId, (tx) =>
+      tx.productSku.findMany({ where: { isActive: true }, orderBy: { skuCode: 'asc' } }),
+    );
+  }
+
   async findAllBatches(tenantId: string) {
     const rows = await this.prisma.forTenant(tenantId, (tx) =>
       tx.$queryRaw<Array<Record<string, unknown>>>`

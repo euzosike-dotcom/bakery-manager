@@ -1,0 +1,22 @@
+-- Closes the "no SKU catalog / pricing endpoint" gap (README "Known
+-- gaps"): Sales Order capture has hardcoded a single finished-good SKU
+-- and let the agent type any unit price since the vertical slice first
+-- shipped, because product_skus (008_manufacturing.sql) never carried a
+-- selling price and nothing ever exposed the table over an API.
+--
+-- Deliberately a single current price per SKU, not a versioned/effective-
+-- dated price list — nothing in this platform's scope needs multi-tier or
+-- time-bound pricing yet, and order_lines.unit_price (010_sales_agent_
+-- capital.sql) already stays a free, agent-entered field on the order
+-- line itself; list_price is only ever a suggested default the client
+-- pre-fills from, never a constraint the server enforces. Nullable —
+-- RAW_MATERIAL rows have no selling price at all, and even a
+-- FINISHED_GOOD row without one just means "no suggested price yet," not
+-- an error.
+ALTER TABLE product_skus ADD COLUMN list_price numeric(14,2);
+
+-- No grant changes needed: manufacturing_svc already has table-wide
+-- SELECT on product_skus (009_manufacturing_rls_and_role.sql), which
+-- covers the new column automatically, and nothing in the application
+-- ever writes list_price (set directly via seed/reference-data SQL, same
+-- as every other product_skus column today).

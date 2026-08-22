@@ -12,6 +12,11 @@ export class ProductionController {
     return this.production.listRecipes(tenant.tenantId);
   }
 
+  @Get('product-skus')
+  listProductSkus(@CurrentTenant() tenant: TenantContext) {
+    return this.production.listProductSkus(tenant.tenantId);
+  }
+
   @Get('production-batches')
   findAllBatches(@CurrentTenant() tenant: TenantContext) {
     return this.production.findAllBatches(tenant.tenantId);

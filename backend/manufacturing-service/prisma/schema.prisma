@@ -21,6 +21,7 @@ model ProductSku {
   unitOfMeasure String @map("unit_of_measure")
   standardWeightKg Decimal? @map("standard_weight_kg") @db.Decimal(10, 3)
   isActive    Boolean @map("is_active")
+  listPrice   Decimal? @map("list_price") @db.Decimal(14, 2)
 
   recipes              Recipe[]
   recipeIngredients    RecipeIngredient[]

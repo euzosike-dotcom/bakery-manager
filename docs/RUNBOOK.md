@@ -4416,3 +4416,144 @@ state holds.)
 - No plant-specific `approval_matrix` row exists for any of the three new
   modules either — same gap noted in the original Procurement-only pass,
   still untested beyond the tenant-wide band.
+
+## SKU catalog and pricing
+
+Sales Order capture has hardcoded a single finished-good SKU
+(`_devOrderSkuId`, a Dart constant pointing at BRD-500G) and let the agent
+type any unit price since the vertical slice first shipped — the
+cubit/screen's own comments said as much: "A real SKU catalog picker
+needs a product listing endpoint on sales-service, which doesn't exist
+yet." `product_skus` (008_manufacturing.sql) never carried a selling
+price either, and nothing on any service ever exposed the table over an
+API — `sales-service`'s own Prisma schema already had a read-only
+`ProductSku` model (needed for `order_lines`' foreign key), but no
+controller anywhere ever queried it.
+
+### 1. `list_price` on `product_skus`, owned by manufacturing-service
+
+`026_product_sku_pricing.sql` adds a single nullable `list_price
+numeric(14,2)` column — deliberately not a versioned or effective-dated
+price list; nothing in this platform's scope needs multi-tier or
+time-bound pricing, and `order_lines.unit_price` already stays a free,
+agent-entered field per line, exactly as before. `list_price` is only
+ever a suggested default the client pre-fills from, never a constraint
+the server enforces or validates against. No grant changes needed —
+`manufacturing_svc` already has table-wide `SELECT` on `product_skus`
+(009_manufacturing_rls_and_role.sql), which covers the new column
+automatically, and nothing in the application ever writes `list_price`
+(set directly via seed/reference-data SQL, same as every other
+`product_skus` column).
+
+Seed data (`manufacturing_seed.sql`) sets `list_price = 250.00` on the
+existing BRD-500G row (above its recipe's `standard_cost` of 190.00/unit,
+a plausible margin) and adds a second `FINISHED_GOOD` row, BRD-1KG
+(`list_price = 480.00`), with no recipe of its own — it exists purely so
+the picker has more than one real choice to prove itself against, not to
+extend Manufacturing's own scope.
+
+### 2. `GET /product-skus` on manufacturing-service
+
+Added to the same `ProductionController` that already hosts `GET
+/recipes` (this service has always kept related read endpoints in one
+controller rather than a separate module per resource — see its own
+`@Controller()` with no prefix). `listProductSkus` returns every active
+SKU, not filtered to `FINISHED_GOOD` server-side — raw materials are
+useful catalog data too (e.g. a future Procurement picker), and filtering
+to one category is a trivial client-side concern for a handful of rows,
+not worth a query parameter here. Standard Keycloak-authenticated GET,
+same as every other list endpoint — no special role or approval gate,
+this is a read.
+
+### 3. Mobile: a real picker, not a hardcoded constant
+
+`ApiClient.fetchProductSkus()` — same shape and same online-only
+simplification as `fetchRecipes()` (called directly, not through the
+cursor-based sync/pull path; see README "Known gaps"). Threaded through
+`main.dart` exactly the way `crmApi`/`fetchCustomers()` already was for
+the Customer picker on this same screen: `_AgentsTab` and
+`_AgentDetailScreen` both gained a `manufacturingApi` parameter, and
+`_AgentDetailScreenState.initState` fetches the catalog alongside
+customers, with the same graceful-degradation-to-empty-list on failure.
+
+`SalesOrderCaptureState` gained `productSkus` (the fetched list) and
+`skuId` (the selection); `SalesOrderCaptureCubit.updateSkuId` looks up
+the chosen SKU and pre-fills `unitPrice` from its `listPrice` when one is
+set — `updateUnitPrice` can still freely override it afterward, since
+agents negotiate real prices in the field, same as before this picker
+existed. `submit()` now validates `skuId != null` (a new failure mode
+that didn't exist when the SKU was a hardcoded constant) alongside the
+existing quantity/price checks. The screen adds a `DropdownButtonFormField`
+for Product, filtered to `FINISHED_GOOD` client-side, mirroring the
+existing Customer dropdown's structure; the Unit price `TextFormField` is
+re-keyed on `state.skuId` (`key: ValueKey(state.skuId)`) so its
+`initialValue` — otherwise only honored on first build — actually
+refreshes to show the new pre-fill when the agent picks a different
+product.
+
+### 4. A real bug only running the app caught
+
+Unit tests (mocked Prisma, mocked HTTP) and `flutter analyze` both passed
+clean, but neither exercises actual widget layout. Running the real app
+in the iOS Simulator surfaced a genuine `DropdownButtonFormField`
+right-overflow — "RIGHT OVERFLOWED BY 42 PIXELS," rendered as Flutter's
+diagonal warning stripe — on product labels long enough to exceed the
+field's intrinsic width (e.g. "BRD-1KG — Standard White Bread 1kg
+(480)"). The Customer dropdown never hit this because customer names
+happened to be short enough; nothing about the code made that safe by
+design. Fixed with `isExpanded: true` on the dropdown (so it sizes to the
+available row width instead of its widest item) plus
+`overflow: TextOverflow.ellipsis` on each item's `Text`.
+
+### 5. Verification — the real app, a real device picker, a real synced order
+
+Built and ran the actual Flutter app (not just its unit tests) on a
+booted iPhone 15 Pro simulator, with the dev TLS cert trusted into its
+keychain (same one-time step as the TLS Part B pass):
+
+1. Signed in for real through the native `ASWebAuthenticationSession`
+   flow against Keycloak, confirming the persisted session also restores
+   correctly on a subsequent app relaunch (no re-login needed).
+2. Opened New Sales Order for the seeded agent, opened the Product
+   dropdown, and confirmed both real `FINISHED_GOOD` SKUs appeared with
+   their real catalog prices — first with the overflow bug visible,
+   confirmed fixed after the `isExpanded: true` change and an app
+   restart.
+3. Picked BRD-500G, watched Unit price pre-fill to `250.0` from the
+   catalog (not typed), entered a quantity of 5, confirmed the on-screen
+   order total computed correctly (`1250.00`).
+4. Saved the order (a local, offline-capable Drift write, per this
+   screen's existing design) and triggered a manual sync from the app
+   bar.
+5. Queried the real database afterward: the synced order
+   (`SO-OFFLINE-fbbfd5e4`) matched exactly what was entered on screen —
+   `sku_id` for BRD-500G, `ordered_qty = 5.000`, `unit_price = 250.00`,
+   `total_order_value = 1250.00` — proof the entire chain (picker →
+   pre-fill → local save → sync → real backend order creation → real
+   persisted row) works end to end, not just that each piece compiles.
+
+Also verified directly against the API with a real Keycloak token,
+independent of the mobile app: `GET /product-skus` returns all 6 seeded
+SKUs correctly ordered and shaped (2 `FINISHED_GOOD` with prices, 4
+`RAW_MATERIAL` with null), and a `POST /sales-orders` against the new
+BRD-1KG SKU succeeds and persists correctly — confirming the picker's
+second choice is a genuinely real, orderable SKU, not just a display-only
+addition.
+
+### Known gaps after this pass
+
+- Single current price per SKU, no price history or effective-dating —
+  changing `list_price` has no audit trail and no way to know what an
+  order was priced against after the fact beyond `order_lines.unit_price`
+  itself.
+- No server-side validation that a submitted `unit_price` is anywhere
+  close to `list_price` — by design (agents negotiate real prices), but
+  worth knowing if abuse/fraud detection is ever in scope.
+- `list_price` is only set via seed/reference-data SQL — no endpoint
+  exists to create or update a SKU's price (or a SKU at all) from the
+  application; `product_skus` remains entirely reference data managed
+  outside the app, same as before this pass.
+- The picker is Sales-only — Procurement's PO line entry and
+  Manufacturing's own batch-close flow still don't use `GET
+  /product-skus` for their own SKU selection, even though the endpoint
+  is now generically available to any caller.

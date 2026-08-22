@@ -213,9 +213,29 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   today and moving them would serve no one yet. `core/sync/sync_service.dart`
   still routes outbox events client-side via the `SyncModule` enum — that
   logic didn't need to change, only which URL each `ApiClient` points at.
-- **No SKU catalog / pricing endpoint**: the Sales module's order capture
-  hardcodes one finished-good SKU and lets the user type any unit price —
-  no product-listing or price-list endpoint exists yet on any service.
+- **SKU catalog / pricing now has a real endpoint and a real mobile
+  picker.** `product_skus` (owned by manufacturing-service since the
+  Manufacturing slice shipped) gained a `list_price` column and a new
+  `GET /product-skus` endpoint; Sales Order capture's SKU field, which
+  used to be a hardcoded `_devOrderSkuId` constant with a free-text price
+  the agent typed blind, is now a real dropdown fetched from that
+  endpoint, filtered client-side to `FINISHED_GOOD`, with `unitPrice`
+  pre-filled from the selected SKU's `listPrice` — a suggested default,
+  not a constraint; the agent can still freely override it, since
+  `order_lines.unit_price` was always meant to capture real field-
+  negotiated prices, not enforce a catalog price. Deliberately a single
+  current price per SKU, not a versioned/effective-dated price list —
+  nothing in scope needs that yet. Verified for real, not just unit-
+  tested: ran the actual app in the iOS Simulator, logged in with a real
+  Keycloak token, opened the real product picker (two real
+  `FINISHED_GOOD` SKUs, BRD-500G and a new BRD-1KG seeded for this),
+  picked one, watched the price field pre-fill from the catalog, saved
+  the order, synced it, and confirmed the resulting row in the database
+  matched exactly what was entered on screen. That same run caught a
+  real bug unit tests couldn't have — a `DropdownButtonFormField` right-
+  overflow on the longer product labels, fixed with `isExpanded: true`.
+  See `docs/RUNBOOK.md`'s "SKU catalog and pricing" section for the full
+  trail.
 - **`performance_reward_ledger`** (weekly agent reward bands based on NCR
   performance, `performance.reward_posted.v1` in the SDD) was explicitly
   descoped from the Sales module — a distinct sub-feature, not required to

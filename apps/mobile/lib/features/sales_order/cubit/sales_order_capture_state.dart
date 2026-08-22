@@ -9,7 +9,9 @@ class SalesOrderCaptureState extends Equatable {
     required this.plantId,
     required this.availableCapitalAtOpen,
     required this.customers,
+    required this.productSkus,
     this.customerId,
+    this.skuId,
     this.orderedQty = 0,
     this.unitPrice = 0,
     this.errorMessage,
@@ -28,7 +30,13 @@ class SalesOrderCaptureState extends Equatable {
   // app — not re-fetched here. Optional: NULL means "no CRM customer
   // recorded for this order", which is a fully valid choice.
   final List<Map<String, dynamic>> customers;
+  // Fetched once by the caller (main.dart's _AgentDetailScreen), same
+  // online-only simplification as customers above — the FINISHED_GOOD
+  // filter is applied in the screen, not here, since raw materials are
+  // still valid catalog data other callers of this list might want.
+  final List<Map<String, dynamic>> productSkus;
   final String? customerId;
+  final String? skuId;
   final double orderedQty;
   final double unitPrice;
   final String? errorMessage;
@@ -41,6 +49,7 @@ class SalesOrderCaptureState extends Equatable {
     SalesOrderCaptureStatus? status,
     String? customerId,
     bool clearCustomerId = false,
+    String? skuId,
     double? orderedQty,
     double? unitPrice,
     String? errorMessage,
@@ -52,7 +61,9 @@ class SalesOrderCaptureState extends Equatable {
         plantId: plantId,
         availableCapitalAtOpen: availableCapitalAtOpen,
         customers: customers,
+        productSkus: productSkus,
         customerId: clearCustomerId ? null : (customerId ?? this.customerId),
+        skuId: skuId ?? this.skuId,
         orderedQty: orderedQty ?? this.orderedQty,
         unitPrice: unitPrice ?? this.unitPrice,
         errorMessage: errorMessage,
@@ -66,7 +77,9 @@ class SalesOrderCaptureState extends Equatable {
         plantId,
         availableCapitalAtOpen,
         customers,
+        productSkus,
         customerId,
+        skuId,
         orderedQty,
         unitPrice,
         errorMessage,
