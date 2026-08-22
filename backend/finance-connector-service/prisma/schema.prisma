@@ -1,0 +1,113 @@
+// Prisma schema for the Finance Connector service. Mirrors
+// infra/postgres/migrations/025_finance_connector.sql for the table this
+// service owns (ExternalLedgerPosting), plus read-only models for the
+// tables it consumes from — see procurement-service/prisma/schema.prisma's
+// header comment for why this is generate-only, not the migration source
+// of truth.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Read-only, not RLS-protected (006_rls.sql's tenant_tables array never
+// included tenant_registry itself) — used to find which tenants are
+// configured for this connector at all.
+model TenantRegistry {
+  tenantId            String @id @map("tenant_id") @db.Uuid
+  financeConnectorType String @map("finance_connector_type")
+
+  @@map("tenant_registry")
+}
+
+// Read-write on queueStatus/retryCount/lastErrorMessage/postedExternalId
+// only — this service never creates or deletes a queue row, only ledger-
+// service (Go) does that. Owned by 005_finance.sql.
+model IntegrationQueue {
+  tenantId          String    @map("tenant_id") @db.Uuid
+  queueId           String    @map("queue_id") @db.Uuid
+  externalSystem    String    @map("external_system")
+  sourceModule      String    @map("source_module")
+  sourceRecordId    String    @map("source_record_id")
+  transactionType   String    @map("transaction_type")
+  payloadJson       Json      @map("payload_json")
+  queueStatus       String    @map("queue_status")
+  retryCount        Int       @map("retry_count")
+  lastErrorMessage  String?   @map("last_error_message")
+  postedExternalId  String?   @map("posted_external_id")
+  queuedTime        DateTime  @map("queued_time")
+
+  @@id([tenantId, queueId])
+  @@map("integration_queue")
+}
+
+// Read-only — the Unified Ledger's own system of record (005_finance.sql).
+// This service reads it to build the posting it relays; it never writes to
+// either table.
+model JournalEntry {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  journalEntryId String   @map("journal_entry_id") @db.Uuid
+  sourceModule   String   @map("source_module")
+  postingDate    DateTime @map("posting_date")
+  status         String
+  memo           String?
+
+  lines JournalLine[]
+
+  @@id([tenantId, journalEntryId])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  tenantId          String  @map("tenant_id") @db.Uuid
+  journalLineId     String  @map("journal_line_id") @db.Uuid
+  journalEntryId    String  @map("journal_entry_id") @db.Uuid
+  accountCode       String  @map("account_code")
+  debitAmount       Decimal @map("debit_amount") @db.Decimal(14, 2)
+  creditAmount      Decimal @map("credit_amount") @db.Decimal(14, 2)
+  costCenterPlantId String? @map("cost_center_plant_id") @db.Uuid
+
+  journalEntry JournalEntry @relation(fields: [tenantId, journalEntryId], references: [tenantId, journalEntryId])
+
+  @@id([tenantId, journalLineId])
+  @@map("journal_lines")
+}
+
+// Insert-only from this service — owned by 005_finance.sql, already
+// written to by ledger-service (Go) for its own failure class; this
+// service reuses it for the "gave up after N retries" escalation path.
+model FailedPostingReview {
+  tenantId      String    @map("tenant_id") @db.Uuid
+  reviewId      String    @map("review_id") @db.Uuid
+  queueId       String    @map("queue_id") @db.Uuid
+  sourceRecordId String   @map("source_record_id")
+  errorMessage   String   @map("error_message")
+  reviewStatus   String   @map("review_status")
+  reviewedBy     String?  @map("reviewed_by") @db.Uuid
+  reviewedTime   DateTime? @map("reviewed_time")
+
+  @@id([tenantId, reviewId])
+  @@map("failed_posting_review")
+}
+
+// Owned by this service (025_finance_connector.sql) — what the custom
+// finance module actually received and persisted for each synced posting.
+model ExternalLedgerPosting {
+  tenantId           String   @map("tenant_id") @db.Uuid
+  externalPostingId  String   @map("external_posting_id") @db.Uuid
+  queueId            String   @map("queue_id") @db.Uuid
+  sourceModule       String   @map("source_module")
+  transactionType    String   @map("transaction_type")
+  journalEntryId     String   @map("journal_entry_id") @db.Uuid
+  linesJson          Json     @map("lines_json")
+  postedExternalId   String   @map("posted_external_id")
+  receivedAt         DateTime @map("received_at")
+
+  @@id([tenantId, externalPostingId])
+  @@unique([tenantId, queueId])
+  @@map("external_ledger_postings")
+}

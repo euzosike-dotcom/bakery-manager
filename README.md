@@ -159,9 +159,37 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   entire chain through actual application code, not hand-built curl
   headers. See docs/RUNBOOK.md's "Machine-to-machine auth" section for
   the full build and verification trail.
-- **Finance connector** (Zoho Books / QuickBooks): `integration_queue` rows
-  are written by the ledger service but nothing consumes them yet — the
-  actual outbound connector is a separate build.
+- **Finance connector now has a real consumer — Metrock's own custom
+  module, not Zoho Books/QuickBooks.** `integration_queue` rows have
+  always been written by ledger-service's `PostingEngine` for every
+  posted journal entry; nothing ever consumed them (49 real rows across
+  every module sat `PENDING` indefinitely under the dev seed's
+  aspirational `finance_connector_type = 'ZOHO_BOOKS'`, which never had
+  an actual Zoho account behind it). A new standalone service,
+  `finance-connector-service` (port 3009), polls `integration_queue` for
+  a tenant's configured connector — `tenant_registry.finance_connector_
+  type` gained a new `'CUSTOM_MODULE'` value alongside the existing
+  Zoho/QuickBooks/Xero/SAP options rather than replacing them, since a
+  future real tenant on this platform might still want one of those for
+  real — builds the actual posting from `journal_entries`/`journal_lines`
+  (not the raw event payload `integration_queue.payload_json` carries),
+  and records it into a new table, `external_ledger_postings`, that
+  represents what the custom module actually received. Failures retry up
+  to 3 times before escalating to `failed_posting_review` — the same
+  table `ledger-service`'s own Go posting engine already writes to for
+  its own, unrelated failure class. This is the first cross-tenant
+  background job in this platform's NestJS services (every other service
+  is scoped to one request's `x-tenant-id`; this one enumerates
+  `tenant_registry` itself on a timer). Verified for real: the 49
+  historical backlogged rows were synced on the very first poll tick
+  after startup, a forced failure (a queue row pointing at a nonexistent
+  journal entry) was watched escalating through 3 real retries to
+  `FAILED` + a real `failed_posting_review` row, and RLS was confirmed
+  blocking cross-tenant reads for the new `finance_connector_svc` role.
+  See `docs/RUNBOOK.md`'s "Finance connector" section for the full trail,
+  including why a naive `.create()` + catch-the-duplicate-key-error
+  idempotency approach doesn't actually work against Prisma's interactive
+  transactions (an `upsert` avoids the problem entirely).
 - **Multi-tenancy isolation tiers**: only the "Pool" tier (shared schema +
   RLS) is implemented. Schema-per-tenant ("Bridge") and database-per-tenant
   ("Silo") provisioning are not built yet.

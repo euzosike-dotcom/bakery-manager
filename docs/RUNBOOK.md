@@ -4045,6 +4045,195 @@ proving the restore path actually works, not just that `pg_dump` exits
   other dev-stack infra pass; this is an operational script, not
   something the automated test suite exercises on every push.
 
+## Finance connector — a new custom module, not Zoho/QuickBooks
+
+`integration_queue` (005_finance.sql) has existed since the Unified Ledger
+shipped: ledger-service's Go `PostingEngine` already wrote a `PENDING` row
+for every posted journal entry, keyed by `tenant_registry
+.finance_connector_type`. Nothing ever consumed those rows — the SDD
+scoped the consuming side as an optional "Finance Connector Framework"
+targeting Zoho Books/QuickBooks/Xero/SAP, none of which this platform
+actually integrates with. The dev seed's tenant had `finance_connector_type
+= 'ZOHO_BOOKS'` since the very first Governance-slice seed, purely
+aspirational — there was never a real Zoho account behind it, so 49 real
+journal entries across every module sat `PENDING` indefinitely, silently
+never synced anywhere.
+
+This pass builds the consuming side for real, but targeting Metrock's own
+custom-built finance module instead of a third-party SaaS product —
+explicit user direction, not a default assumption. `integration_queue`'s
+schema doesn't hardcode Zoho at all (`external_system` is a plain text
+column, `'NONE'` default), so this isn't fighting the design; it's
+finishing the half that was never built.
+
+### 1. Why a new standalone service, not a module bolted onto an existing one
+
+Three placements were considered: inside `accounting-service` (financially
+adjacent), inside `ledger-service`'s existing Go codebase (already owns the
+producer side), or a new standalone NestJS service. The new service won:
+`ledger-service` is a trusted background batch consumer that intentionally
+runs as the Postgres superuser (007_app_role.sql's comment) — a different
+trust model than a request-serving module with its own least-privilege
+role, RLS-scoped reads, and a real HTTP surface (`/health`, `/metrics`,
+`GET /external-postings`). Bolting a sync worker onto accounting-service
+would couple its uptime and blast radius to the accounting API's. A new
+service, `finance-connector-service` (port 3009), follows the exact same
+scaffold every other domain service already uses — see `backend/crm-
+service` as the closest template (no M2M client, no `PostingAuthorityClient`,
+just Prisma + Keycloak auth + the observability primitives).
+
+### 2. `tenant_registry.finance_connector_type` gets a new value, not a replacement
+
+`025_finance_connector.sql` adds `'CUSTOM_MODULE'` to the existing CHECK
+constraint (`NONE`, `ZOHO_BOOKS`, `QUICKBOOKS`, `XERO`, `SAP`) rather than
+replacing those values — a real resold tenant on this platform may
+genuinely want an actual Zoho/QuickBooks connector later, and the SDD's
+per-tenant connector choice should keep room for that. `dev_seed.sql`'s
+Metrock row moves from `'ZOHO_BOOKS'` to `'CUSTOM_MODULE'`; the 49 real
+`PENDING` rows already queued under the old, never-consumed value were
+backfilled live (`UPDATE integration_queue SET external_system =
+'CUSTOM_MODULE' WHERE external_system = 'ZOHO_BOOKS' AND queue_status =
+'PENDING'`) so the new connector actually has the full historical backlog
+to prove itself against, not just a synthetic test row.
+
+### 3. `external_ledger_postings` — what the custom module actually stores
+
+A new table (`025_finance_connector.sql`), owned by `finance-connector-
+service`, RLS-enabled the same way as every other tenant table. One row
+per synced `integration_queue` row, not a live join back to
+`journal_entries`/`journal_lines` — a real external system's own ledger
+mirror wouldn't stay joined to the Unified Ledger after ingesting a
+posting, so `lines_json` snapshots that entry's full set of GL lines
+(`account_code`/`debit_amount`/`credit_amount`/`cost_center_plant_id`) at
+sync time. `UNIQUE (tenant_id, queue_id)` is the idempotency backstop —
+see below for why it matters more than it looks like it should.
+
+### 4. `FinanceConnectorService` — the first cross-tenant background job in this codebase
+
+Every other NestJS service in this platform is request-scoped: an
+incoming call carries `x-tenant-id`, `KeycloakAuthMiddleware` verifies it,
+and `PrismaService.forTenant` scopes the rest of that one request. A
+background poller has no request to inherit a tenant from, so
+`pollAllTenants` enumerates `tenant_registry` itself each tick (a plain,
+non-RLS-scoped query — `tenant_registry` was never in `006_rls.sql`'s
+`tenant_tables` array) for tenants configured with
+`financeConnectorType = 'CUSTOM_MODULE'`, then runs one `forTenant`-scoped
+pass per tenant — same session-variable RLS mechanism every request-scoped
+service already relies on, just driven by a `setInterval` instead of a
+controller. No `@nestjs/schedule` dependency — this is the only scheduled
+job anywhere in the codebase, so a new package for one timer would be
+exactly the premature abstraction this codebase avoids elsewhere.
+
+Per pending row (`POLL_INTERVAL_MS`, default 5000ms; batch size 20 per
+tenant per tick), each processed in its OWN transaction so one bad row
+never blocks the rest of the batch:
+
+1. Looks up the source `journal_entries` row (+ its `journal_lines`) by
+   `integration_queue.source_record_id` — not `payload_json`, which is the
+   raw domain event, not a GL-shaped posting. Missing entry → treated as a
+   processing failure (see retry/escalation below); this should never
+   happen in practice (ledger-service writes the queue row in the same
+   transaction as the journal entry, 005_finance.sql/posting_engine.go),
+   so a real occurrence would mean something is genuinely wrong, not a
+   normal race to tolerate silently.
+2. `externalLedgerPosting.upsert` (not `.create`) against the
+   `(tenantId, queueId)` unique constraint, `update: {}` on conflict — the
+   idempotency mechanism. A plain `.create()` + catching the resulting
+   `P2002` inline would NOT work here: Prisma's interactive transactions
+   don't savepoint each statement, so a caught constraint violation still
+   leaves the surrounding transaction unusable for any further query
+   (Postgres marks the whole transaction block aborted, not just the one
+   statement) — the queue-status update immediately after would itself
+   fail with "current transaction is aborted." `upsert` sidesteps this
+   entirely: no exception is ever thrown, and its return value is
+   whichever row actually exists — freshly inserted, or already there from
+   a prior attempt that crashed between this insert and the next step.
+3. Marks `integration_queue` `POSTED`, using the `postedExternalId` FROM
+   THAT RETURNED ROW, not a freshly generated one — so a crash-and-retry
+   converges on the id that was actually stored, not a new orphaned one.
+
+On failure: `retryCount` increments; below `MAX_RETRIES` (3) the row stays
+`PENDING` with `lastErrorMessage` set, for the next tick to retry; at the
+threshold, `queueStatus` becomes `FAILED` and a `failed_posting_review` row
+opens — reusing the exact table `ledger-service`'s own Go `recordFailure`
+already writes to for its own, unrelated failure class (no posting rule
+found), giving Operations one review queue instead of two.
+
+### 5. `GET /external-postings`
+
+Read-only verification endpoint, same list-endpoint convention as every
+other module (`@CurrentTenant()`, standard Keycloak auth, no special
+role/approval gate — this is a read, like `GET /production-batches` or
+`GET /purchase-orders`). No M2M client anywhere in this service — unlike
+every request-serving domain service's `PostingAuthorityClient`, this
+poller never calls `governance-service`: it's an automated background
+relay, not a user-initiated posting action, the same reasoning
+`ledger-service`'s own `PostingEngine` already relies on to skip
+authority checks entirely.
+
+### 6. Verification — real backlog, real failure, real RLS
+
+Against the actual dev database, not mocks:
+
+1. Applied `025_finance_connector.sql` live; confirmed the new
+   `finance_connector_svc` role, `external_ledger_postings` table, and RLS
+   policy all exist as expected.
+2. Flipped the live tenant's `finance_connector_type` to `'CUSTOM_MODULE'`
+   and backfilled the 49 real orphaned `PENDING` rows (procurement,
+   manufacturing, accounting, fleet, sales, hr — every module that had
+   ever posted through `ledger-service`) to the new connector type.
+3. Started `finance-connector-service` for real
+   (`NODE_EXTRA_CA_CERTS`-aware, same restart pattern as every other
+   service). Within one poll tick, all 49 backlogged rows synced: `queue_
+   status` flipped to `POSTED` on every one, and `external_ledger_postings`
+   gained exactly 49 rows. Spot-checked one (a real GRN posting,
+   `procurement`/`grn.posted.v1`) — `lines_json` carried the actual
+   account codes (`1310`/`2110`), amounts, and plant id from the real
+   journal entry, `posted_external_id` correctly `CUSTOM-<uuid>`-shaped.
+4. `GET /external-postings` with a real Keycloak token
+   (`chidinma.eze@metrock.dev`) returned exactly that data; the same
+   request with no token returned a real `401`.
+5. Forced a real failure: inserted a synthetic `PENDING` row pointing at a
+   nonexistent `journal_entry_id`. Watched three real poll cycles (~15s)
+   escalate it — `retry_count` incrementing 1 → 2 → 3 in the structured
+   logs and the database in lockstep, `queue_status` finally flipping to
+   `FAILED` with a matching `failed_posting_review` row (`review_status =
+   OPEN`) — then cleaned up the synthetic row.
+6. RLS smoke test: `finance_connector_svc` connecting directly and setting
+   `app.tenant_id` to an unrelated tenant returned `0` rows from
+   `external_ledger_postings` despite 49 real rows existing for the actual
+   tenant.
+7. Jest suite (`finance-connector.service.spec.ts`, 5 tests, mocked
+   Prisma): the happy path's `lines_json` shape, the idempotent-upsert
+   case (asserting the queue update uses the upsert's RETURNED
+   `postedExternalId`, not a freshly generated one — the specific
+   behavior the aborted-transaction gotcha above makes worth locking
+   down), under-threshold retry, and threshold escalation with the
+   `failed_posting_review` row. Added to `.github/workflows/ci.yml`'s
+   Node-services matrix.
+
+### Known gaps after this pass
+
+- Single connector type wired up end-to-end (`CUSTOM_MODULE`) — `ZOHO_
+  BOOKS`/`QUICKBOOKS`/`XERO`/`SAP` remain valid `tenant_registry` values
+  for a future real tenant, but no actual connector logic exists for any
+  of them; a tenant configured with one today would queue rows forever
+  with nothing to consume them, exactly the bug this pass just fixed for
+  `CUSTOM_MODULE`.
+- No dead-letter reprocessing UI — `failed_posting_review` rows can be
+  read via SQL but there's no endpoint to retry or resolve one; the
+  review table exists (shared with ledger-service's own failure class)
+  but nothing acts on `review_status = OPEN` yet.
+- Poll interval and batch size are fixed dev-appropriate defaults
+  (5000ms / 20 rows per tenant per tick), not tuned against any real
+  production volume or SLA.
+- Single-instance only — no leader election or advisory locking. Two
+  instances of this service running against the same database would both
+  poll and could race on the same queue row; `upsert`'s idempotency means
+  a race can't cause a double-post, but it could cause redundant work.
+  Not a real risk today (this service isn't deployed more than once
+  anywhere), worth knowing before it ever is.
+
 ## Approval-matrix enforcement — expansion beyond Procurement
 
 The gap left open above: `checkApprovalAuthority` only ever resolved

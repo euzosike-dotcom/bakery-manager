@@ -24,6 +24,7 @@ jobs:
           - fleet-service
           - hr-service
           - crm-service
+          - finance-connector-service
     env:
       # prisma generate reads the schema statically and does not connect to
       # this URL, but requires a syntactically valid one to be present.

@@ -25,7 +25,7 @@
 -- Run as the postgres superuser role (bypasses RLS regardless of FORCE).
 
 INSERT INTO tenant_registry (tenant_id, tenant_code, tenant_name, isolation_tier, default_currency, finance_connector_type)
-VALUES ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'METROCK', 'Metrock Enterprises', 'POOL', 'NGN', 'ZOHO_BOOKS');
+VALUES ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'METROCK', 'Metrock Enterprises', 'POOL', 'NGN', 'CUSTOM_MODULE');
 
 INSERT INTO roles (tenant_id, role_id, role_code, role_name, role_category, can_approve, can_post, can_override)
 VALUES
