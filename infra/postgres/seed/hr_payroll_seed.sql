@@ -31,3 +31,17 @@ VALUES
         'b17d9226-2a43-43eb-8c5e-a923637b23c5', 'a7db5d71-6f56-42c7-94a5-fe48d3eaf6b0',
         'EMP-0002', 'Tunde Bakare', 'aba294c3-c28c-43a9-a465-67ced442a487', 'Production', 'GRADE_B', 'ACTIVE'
     );
+
+-- Nigerian PAYE progressive bands (Personal Income Tax Act, as amended by
+-- the Finance Act 2020) — ANNUAL thresholds; hr-service annualizes gross
+-- monthly pay before applying these, then de-annualizes the result (see
+-- payroll-tax.ts). tenant_registry.pension_employee_rate keeps its
+-- migration-default 0.08 (8%, Pension Reform Act 2014) — not overridden
+-- here, nothing about this tenant needs a non-standard rate.
+INSERT INTO payroll_tax_bands (tenant_id, band_order, threshold_min, threshold_max, rate) VALUES
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 1,       0.00,  300000.00, 0.07),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 2,  300000.00,  600000.00, 0.11),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 3,  600000.00, 1100000.00, 0.15),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 4, 1100000.00, 1600000.00, 0.19),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 5, 1600000.00, 3200000.00, 0.21),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 6, 3200000.00,       NULL, 0.24);

@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
 import { CalculatePayrollRunDto } from './dto/payroll.dto';
+import { computeStatutoryDeductions, TaxBand } from './payroll-tax';
 
 /**
  * Revenue-Based Payroll (SDD §3.F):
@@ -25,6 +26,11 @@ import { CalculatePayrollRunDto } from './dto/payroll.dto';
  * fuel-variance tolerance. A misconfigured set of weights will simply
  * under- or over-allocate the pool; that's a real, documented gap, not
  * silently handled.
+ *
+ * netSalary = grossSalary - statutory deductions (PAYE + pension, see
+ * payroll-tax.ts), computed fresh per employee at calculation time —
+ * 027_statutory_payroll_deductions.sql. Both feed the same GL posting as
+ * before (postRun sums net_salary, unaffected by this).
  */
 @Injectable()
 export class PayrollService {
@@ -74,6 +80,17 @@ export class PayrollService {
         include: { grade: true },
       });
 
+      const tenantRow = await tx.tenantRegistry.findUnique({ where: { tenantId } });
+      if (!tenantRow) throw new NotFoundException(`Tenant ${tenantId} not found`);
+      const pensionEmployeeRate = Number(tenantRow.pensionEmployeeRate);
+
+      const bandRows = await tx.payrollTaxBand.findMany({ where: { tenantId }, orderBy: { bandOrder: 'asc' } });
+      const bands: TaxBand[] = bandRows.map((b) => ({
+        thresholdMin: Number(b.thresholdMin),
+        thresholdMax: b.thresholdMax === null ? null : Number(b.thresholdMax),
+        rate: Number(b.rate),
+      }));
+
       const payrollRunId = randomUUID();
       await tx.payrollRun.create({
         data: {
@@ -93,6 +110,7 @@ export class PayrollService {
       for (const employee of employees) {
         const gradeWeight = Number(employee.grade.gradeWeight);
         const grossSalary = payrollPool * gradeWeight;
+        const deductions = computeStatutoryDeductions(grossSalary, pensionEmployeeRate, bands);
         await tx.payrollRecord.create({
           data: {
             tenantId,
@@ -101,8 +119,9 @@ export class PayrollService {
             employeeId: employee.employeeId,
             gradeWeightUsed: gradeWeight,
             grossSalary,
-            totalDeductions: 0,
-            netSalary: grossSalary,
+            totalDeductions: deductions.totalDeductions,
+            deductionsBreakdown: { payeAmount: deductions.payeAmount, pensionAmount: deductions.pensionAmount },
+            netSalary: grossSalary - deductions.totalDeductions,
           },
         });
       }

@@ -45,6 +45,32 @@ model SalesOrder {
   @@map("sales_orders")
 }
 
+// Read-only, not RLS-protected (006_rls.sql's tenant_tables array never
+// included tenant_registry itself) — used only to read this tenant's
+// pension_employee_rate at calculation time.
+model TenantRegistry {
+  tenantId             String  @id @map("tenant_id") @db.Uuid
+  pensionEmployeeRate  Decimal @map("pension_employee_rate") @db.Decimal(5, 4)
+
+  @@map("tenant_registry")
+}
+
+// Progressive PAYE bands (027_statutory_payroll_deductions.sql) — same
+// threshold-band shape as governance-service's approval_matrix, reused
+// here for tax instead of approval routing.
+model PayrollTaxBand {
+  tenantId     String  @map("tenant_id") @db.Uuid
+  bandId       String  @map("band_id") @db.Uuid
+  bandOrder    Int     @map("band_order")
+  thresholdMin Decimal @map("threshold_min") @db.Decimal(14, 2)
+  thresholdMax Decimal? @map("threshold_max") @db.Decimal(14, 2)
+  rate         Decimal @map("rate") @db.Decimal(5, 4)
+
+  @@id([tenantId, bandId])
+  @@unique([tenantId, bandOrder])
+  @@map("payroll_tax_bands")
+}
+
 model SalaryGrade {
   tenantId    String  @map("tenant_id") @db.Uuid
   gradeCode   String  @map("grade_code")
@@ -128,6 +154,7 @@ model PayrollRecord {
   gradeWeightUsed Decimal @map("grade_weight_used") @db.Decimal(6, 4)
   grossSalary     Decimal @map("gross_salary") @db.Decimal(14, 2)
   totalDeductions Decimal @map("total_deductions") @db.Decimal(14, 2)
+  deductionsBreakdown Json? @map("deductions_breakdown")
   netSalary       Decimal @map("net_salary") @db.Decimal(14, 2)
 
   payrollRun PayrollRun @relation(fields: [tenantId, payrollRunId], references: [tenantId, payrollRunId])

@@ -39,6 +39,11 @@ describe('PayrollService.calculateRun — Payroll Pool = Plant Revenue x Payroll
           { employeeId: 'emp-2', grade: { gradeWeight: 0.4 } },
         ]),
       },
+      // No PAYE bands in this fixture — isolates the grossSalary/pension
+      // assertions from PAYE's own math, which payroll-tax.spec.ts
+      // already covers exhaustively on its own.
+      tenantRegistry: { findUnique: jest.fn().mockResolvedValue({ pensionEmployeeRate: 0.08 }) },
+      payrollTaxBand: { findMany: jest.fn().mockResolvedValue([]) },
       payrollRecord: { create: jest.fn().mockImplementation(({ data }) => created.records.push(data)) },
     };
     const service = new PayrollService(makePrisma(tx), makeKafka(), makePostingAuthority());
@@ -48,9 +53,46 @@ describe('PayrollService.calculateRun — Payroll Pool = Plant Revenue x Payroll
     // Plant revenue 500,000 x ratio 0.1 = payroll pool 50,000.
     expect((created.payrollRun as { totalPayrollPool: number }).totalPayrollPool).toBe(50000);
     expect(created.records).toEqual([
-      expect.objectContaining({ employeeId: 'emp-1', grossSalary: 30000 }), // 50,000 x 0.6
-      expect.objectContaining({ employeeId: 'emp-2', grossSalary: 20000 }), // 50,000 x 0.4
+      // 50,000 x 0.6 = 30,000 gross; pension = 30,000 x 0.08 = 2,400; no
+      // PAYE bands configured in this fixture, so total deductions is
+      // pension alone.
+      expect.objectContaining({ employeeId: 'emp-1', grossSalary: 30000, totalDeductions: 2400, netSalary: 27600 }),
+      // 50,000 x 0.4 = 20,000 gross; pension = 1,600.
+      expect.objectContaining({ employeeId: 'emp-2', grossSalary: 20000, totalDeductions: 1600, netSalary: 18400 }),
     ]);
+  });
+
+  it('wires configured PAYE bands into the deduction calculation correctly', async () => {
+    const created: { records: unknown[] } = { records: [] };
+    const tx = {
+      payrollRun: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() },
+      plant: { findUnique: jest.fn().mockResolvedValue({ payrollRatio: 1 }) },
+      salesOrder: { findMany: jest.fn().mockResolvedValue([{ totalOrderValue: 30000 }]) },
+      employee: { findMany: jest.fn().mockResolvedValue([{ employeeId: 'emp-1', grade: { gradeWeight: 1 } }]) },
+      tenantRegistry: { findUnique: jest.fn().mockResolvedValue({ pensionEmployeeRate: 0.08 }) },
+      payrollTaxBand: {
+        findMany: jest.fn().mockResolvedValue([
+          { bandOrder: 1, thresholdMin: 0, thresholdMax: 300000, rate: 0.07 },
+        ]),
+      },
+      payrollRecord: { create: jest.fn().mockImplementation(({ data }) => created.records.push(data)) },
+    };
+    const service = new PayrollService(makePrisma(tx), makeKafka(), makePostingAuthority());
+
+    await service.calculateRun(TENANT, { plantId: 'plant-1', payrollPeriod: '2026-07' });
+
+    // Gross 30,000/month (matches payroll-tax.spec.ts's low-earner case):
+    // pension 2,400, PAYE ~345.33 -> total ~2,745.33.
+    expect(tx.payrollTaxBand.findMany).toHaveBeenCalledWith({
+      where: { tenantId: TENANT },
+      orderBy: { bandOrder: 'asc' },
+    });
+    const record = created.records[0] as { totalDeductions: number; deductionsBreakdown: unknown };
+    expect(record.totalDeductions).toBeCloseTo(2745.33, 2);
+    expect(record.deductionsBreakdown).toEqual({
+      payeAmount: expect.closeTo(345.33, 2),
+      pensionAmount: 2400,
+    });
   });
 
   it('rejects creating a second payroll run for the same plant and period', async () => {

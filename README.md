@@ -300,9 +300,32 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   the SDD itself scopes attendance clock-in/out as the only offline-
   relevant surface in this module; neither is required to prove that
   pattern or the revenue-based payroll calculation.
-- **No statutory payroll deduction engine** — `payroll_records
-  .total_deductions` is always 0 (no tax/pension tables). A real
-  deployment needs this before any real payslip could be cut.
+- **Statutory payroll deductions are now real** — `payroll_records
+  .total_deductions` used to be hardcoded to 0. `PayrollService
+  .calculateRun` now computes Nigerian PAYE income tax (Personal Income
+  Tax Act, as amended by the Finance Act 2020) and pension (Pension
+  Reform Act 2014, 8% employee contribution) per employee, via a new
+  pure function (`payroll-tax.ts`) kept separate from the database layer
+  so its tax-law edge cases can be unit-tested in isolation. The PAYE
+  bands are tenant-configurable data (`payroll_tax_bands`) — the exact
+  same threshold-band shape `approval_matrix` already uses, reused here
+  for tax instead of approval routing — and the pension rate is a single
+  tenant-wide column (`tenant_registry.pension_employee_rate`, same shape
+  as `finance_connector_type`); only the Consolidated Relief Allowance
+  formula and the annualize/de-annualize computation shape are Nigeria-
+  specific application logic, not data. `payroll_records` gained a
+  `deductions_breakdown` JSONB snapshot (PAYE amount, pension amount)
+  alongside the existing `total_deductions` sum, matching how every other
+  module snapshots its own computation inputs. NHF (National Housing
+  Fund) is deliberately not modeled — inconsistently enforced in Nigerian
+  SME payroll practice, a separate judgment call this pass doesn't try to
+  make. Verified against a real payroll run for real seeded employees,
+  not just unit tests: `POST /payroll-runs` and the resulting `POST
+  .../post` both matched hand-computed expected values exactly (down to
+  the cent) for both a low earner who owes PAYE and one whose income
+  falls entirely within the tax-free relief threshold once CRA and
+  pension are applied. See `docs/RUNBOOK.md`'s "Statutory payroll
+  deductions" section for the full trail.
 - **HR's grade weights aren't validated to sum to 1.0** — tenant-
   configurable, not enforced; a misconfigured set silently under- or
   over-allocates the payroll pool rather than erroring.

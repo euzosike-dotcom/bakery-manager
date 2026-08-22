@@ -4557,3 +4557,161 @@ addition.
   Manufacturing's own batch-close flow still don't use `GET
   /product-skus` for their own SKU selection, even though the endpoint
   is now generically available to any caller.
+
+## Statutory payroll deductions
+
+`payroll_records.total_deductions` has been hardcoded to `0` since the
+HR/Payroll slice shipped — migration 019's own header comment said so
+explicitly ("no statutory deduction engine (tax/pension) in this
+slice"). This pass builds that engine for real, scoped to the two
+deductions every Nigerian private-sector employer of this platform's
+size is universally subject to: PAYE income tax (Personal Income Tax
+Act, as amended by the Finance Act 2020) and pension (Pension Reform
+Act 2014, 8% employee contribution). NHF (National Housing Fund) is
+deliberately NOT modeled — inconsistently enforced in Nigerian SME
+payroll practice, a separate judgment call this pass doesn't try to
+make.
+
+### 1. Configuration: reusing `approval_matrix`'s own shape, not inventing a new one
+
+`027_statutory_payroll_deductions.sql` adds two new configuration
+sources:
+
+- `tenant_registry.pension_employee_rate` — a single flat rate
+  (default `0.08`), same shape as `finance_connector_type`: one column
+  on the tenant's own row, since there's only ever one rate per tenant.
+- `payroll_tax_bands` — progressive PAYE bands, tenant-scoped, with the
+  EXACT same threshold-band shape `approval_matrix`
+  (003_governance.sql) already established: an order, an inclusive
+  lower bound, a nullable exclusive upper bound (`NULL` = "and above",
+  the top band), and a rate. Reused deliberately rather than inventing
+  a parallel banding mechanism — this codebase already had exactly the
+  right shape for progressive-threshold data, just for approval routing
+  instead of tax.
+
+The band *rates* are data; the Consolidated Relief Allowance formula
+and the annualize/de-annualize computation shape are Nigeria-specific
+application logic, not data — a real multi-country deployment would
+need to generalize that part too, a known gap this pass doesn't solve
+(same "known, not solved yet" treatment as the missing secrets manager
+elsewhere in this README).
+
+`hr_svc` gained `SELECT` on both `tenant_registry` (table-wide, not
+RLS-protected — same as `finance-connector-service`'s read of the same
+table) and the new `payroll_tax_bands` (RLS-enabled, same
+`tenant_isolation` policy as every other tenant table).
+
+`payroll_records` gained a `deductions_breakdown jsonb` column — an
+auditable snapshot of the computation (`{payeAmount, pensionAmount}`),
+alongside the existing `total_deductions` sum which keeps its original
+meaning and type; nothing downstream reads the breakdown (the GL
+posting rule sums `net_salary`, not `total_deductions`), so this is
+purely for inspectability, same reasoning as `grade_weight_used`/
+`payroll_ratio_used` already snapshotting their own inputs.
+
+### 2. `payroll-tax.ts` — a pure function, kept out of the database layer on purpose
+
+`computeStatutoryDeductions(grossMonthly, pensionEmployeeRate, bands)`
+takes plain numbers and a plain band array in, returns
+`{payeAmount, pensionAmount, totalDeductions}` out — no Prisma, no
+`tenantId`, no I/O of any kind. This mirrors `ledger-service`'s
+`amountFromPayload`/`nullableUUID` pure-helper precedent: tax-law edge
+cases (a zero-income employee, an employee whose entire income falls
+within the tax-free relief threshold, an employee whose income spans
+every band) are exactly the kind of thing worth testing directly and
+exhaustively, without a mocked Prisma transaction in the way.
+
+The computation, standard Nigerian monthly PAYE practice:
+
+1. Annualize gross monthly pay (`x12`).
+2. Compute the Consolidated Relief Allowance: the greater of ₦200,000
+   or 1% of annual gross, PLUS 20% of annual gross.
+3. Compute the annual pension contribution (gross x
+   `pensionEmployeeRate`).
+4. Taxable annual income = annual gross − CRA − pension, floored at
+   zero (a low enough earner owes no PAYE at all, once relief and
+   pension are applied — this is real, not a bug: Nigerian PAYE
+   effectively exempts minimum-wage-level earners).
+5. Run taxable annual income through the configured bands, summing
+   `rate x (min(taxable, bandMax) − bandMin)` for every band the income
+   reaches.
+6. De-annualize the result (`/12`) for the monthly PAYE figure; pension
+   itself is reported as a flat monthly amount (`grossMonthly x rate`),
+   not derived from the annualized round-trip, since it's already a
+   flat percentage with nothing progressive to annualize for.
+
+### 3. Wiring into `PayrollService.calculateRun`
+
+Per employee, after computing `grossSalary` (unchanged: `payrollPool x
+gradeWeight`), the run now also loads `tenantRegistry.pensionEmployeeRate`
+and `payrollTaxBand.findMany` (once per run, not per employee) and calls
+`computeStatutoryDeductions`. `netSalary` is now genuinely `grossSalary
+− totalDeductions` rather than always equal to `grossSalary`.
+`postRun`'s own logic is untouched — it already summed `net_salary`
+across records for the GL posting, so a real deduction simply flows
+through as a smaller number, no code change needed there.
+
+### 4. Verification — real numbers, not just passing tests
+
+Both layers verified independently:
+
+**Unit tests** (`payroll-tax.spec.ts`, 7 tests): zero income deducts
+nothing; pension is a flat percentage independent of PAYE; a low earner
+(₦30,000/month, the existing seed fixture's own salary level) still
+owes a small real PAYE amount once CRA and pension are applied
+(hand-computed: ₦345.33/month); a high earner's income is taxed across
+every band, not just the top one (hand-computed: ₦65,066.67/month on
+₦500,000 gross); CRA never pushes taxable income negative; a
+single-band, unbounded (`thresholdMax: null`) table taxes everything at
+one flat rate; the function doesn't mutate its inputs.
+`payroll.service.spec.ts` gained a wiring test confirming
+`payrollTaxBand.findMany` is queried with the right shape and its
+result correctly flows into the deduction calculation, plus updated
+assertions on the existing calculation test now that `totalDeductions`/
+`netSalary` are no longer trivially `0`/`grossSalary`.
+
+**Real API + real database**, independent of the unit tests: seeded the
+real 2020 Finance Act bands for the dev tenant, inserted a real
+confirmed sales order for a fresh payroll period (`2026-12`, avoiding
+collision with already-`POSTED` runs from earlier passes), then called
+the actual `POST /payroll-runs` with a real Keycloak token. Both seeded
+employees' results matched hand-computed expected values exactly, to
+the cent:
+
+- Ngozi Adeyemi (GRADE_A, gross ₦36,000/month): PAYE ₦647.73, pension
+  ₦2,880, `totalDeductions` ₦3,527.73, `netSalary` ₦32,472.27.
+- Tunde Bakare (GRADE_B, gross ₦18,000/month): PAYE ₦0 (income falls
+  entirely within CRA + pension relief), pension ₦1,440,
+  `totalDeductions` ₦1,440, `netSalary` ₦16,560.
+
+Then posted the same run via `POST /payroll-runs/:id/post` — governance-
+service was down at first, and the posting-authority check correctly
+fail-closed with a real `503` rather than silently succeeding (same
+fail-closed behavior proven in the original posting-authority retrofit);
+restarted governance-service and retried, which correctly posted with
+`netSalaryTotal` equal to the exact sum of the two employees' reduced
+`netSalary` figures (₦49,032.27), confirming `postRun`'s existing logic
+needed no changes to correctly reflect the new deductions. RLS smoke-
+tested: `hr_svc` connecting directly and setting `app.tenant_id` to an
+unrelated tenant returned `0` rows from `payroll_tax_bands` despite 6
+real seeded rows existing for the actual tenant.
+
+### Known gaps after this pass
+
+- NHF is not modeled, as stated above — a real deployment needs an
+  explicit decision on whether and how to apply it.
+- The Consolidated Relief Allowance formula and the annualize/de-
+  annualize shape are Nigeria-specific application logic, not
+  configurable data — a genuinely multi-country deployment (this
+  platform's own stated goal, per the SDD's "resold to other food-
+  manufacturing enterprises") would need to generalize this, not just
+  swap the band table's contents.
+- No payslip document or UI — `deductions_breakdown` is queryable via
+  the API/database but there's no endpoint or screen presenting it as
+  an actual payslip an employee would see.
+- No mid-year tax regime changes or pro-ration — a band table changed
+  mid-period doesn't retroactively affect already-`CALCULATED` runs
+  (each run reads bands fresh from the current configuration at
+  calculation time, so this is correct going forward, but nothing
+  models a tax law changing mid-tenure the way a real payroll system's
+  historical-band versioning would).
