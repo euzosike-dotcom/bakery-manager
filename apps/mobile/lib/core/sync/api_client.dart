@@ -190,6 +190,25 @@ class ApiClient {
   Future<Map<String, dynamic>> rejectExpenseRequest(String expenseRequestId) =>
       _post('expense-requests/$expenseRequestId/reject');
 
+  /// Sales Agent Onboarding requests pending approval, for the Approvals
+  /// tab — called against sales-service. Unlike every other approval_
+  /// matrix module wired into this tab, a request here may need MORE than
+  /// one approve tap to clear (a real two-level approval_matrix band —
+  /// see governance_seed.sql) — the same approve endpoint is called each
+  /// time; the response's own currentApprovalStage/status tells the
+  /// screen whether it's still pending a further sign-off or fully
+  /// provisioned, no client-side stage tracking needed.
+  Future<List<Map<String, dynamic>>> fetchAgentOnboardingRequests() async {
+    final res = await _client.get(Uri.parse('$baseUrl/agent-onboarding-requests'), headers: await _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> approveAgentOnboarding(String onboardingRequestId) =>
+      _post('agent-onboarding-requests/$onboardingRequestId/approve');
+  Future<Map<String, dynamic>> rejectAgentOnboarding(String onboardingRequestId) =>
+      _post('agent-onboarding-requests/$onboardingRequestId/reject');
+
   Future<Map<String, dynamic>> _post(String path, {Map<String, dynamic>? body}) async {
     final res = await _client.post(
       Uri.parse('$baseUrl/$path'),

@@ -11,6 +11,7 @@ import { PrismaModule } from './common/prisma.module';
 import { KafkaModule } from './common/kafka.module';
 import { GovernanceModule } from './common/governance.module';
 import { AgentsModule } from './agents/agents.module';
+import { AgentOnboardingModule } from './agent-onboarding/agent-onboarding.module';
 import { SalesModule } from './sales/sales.module';
 import { NcrModule } from './ncr/ncr.module';
 import { SyncModule } from './sync/sync.module';
@@ -25,6 +26,7 @@ import { SyncModule } from './sync/sync.module';
     KafkaModule,
     GovernanceModule,
     AgentsModule,
+    AgentOnboardingModule,
     SalesModule,
     NcrModule,
     SyncModule,

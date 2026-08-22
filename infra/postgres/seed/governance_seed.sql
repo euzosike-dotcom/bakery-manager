@@ -54,6 +54,21 @@ VALUES
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'EXPENSE_REQUEST', 0, 20000, '1a946225-e283-4bbe-9c05-939dff09a1cf'),
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'ACCOUNTING', 'EXPENSE_REQUEST', 20000, NULL, '5ee22c8f-d7fa-4f40-9814-744412c5fcde');
 
+-- Sales Agent Onboarding (migration 032) — the first band in this
+-- platform to populate a SECOND approval level, so it needs its own
+-- INSERT with an extended column list rather than fitting the single-
+-- level VALUES list above. A modest-capital agent (below 200,000) only
+-- needs a Procurement Manager's sign-off, same single-level shape as
+-- every other module; a larger-capital agent needs BOTH a Procurement
+-- Manager AND, sequentially after, a Finance Controller — a real,
+-- tenant-configurable two-level chain, not a hardcoded business rule
+-- (checkApprovalAuthority's stage progression already supported this
+-- generically; no band had ever actually populated level 2 until now).
+INSERT INTO approval_matrix (tenant_id, module_name, transaction_type, threshold_min, threshold_max, approval_level_1_role_id, approval_level_2_role_id)
+VALUES
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'SALES', 'AGENT_ONBOARDING', 0, 200000, '1a946225-e283-4bbe-9c05-939dff09a1cf', NULL),
+    ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'SALES', 'AGENT_ONBOARDING', 200000, NULL, '1a946225-e283-4bbe-9c05-939dff09a1cf', '5ee22c8f-d7fa-4f40-9814-744412c5fcde');
+
 INSERT INTO reason_codes (tenant_id, reason_code, reason_group, description)
 VALUES
     ('b17d9226-2a43-43eb-8c5e-a923637b23c5', 'UNAUTHORIZED_POSTING_ATTEMPT', 'SECURITY',

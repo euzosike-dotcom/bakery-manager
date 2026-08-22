@@ -544,6 +544,43 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   `docs/RUNBOOK.md`'s "Expense Management" section for the full
   design-decision and verification trail, including why a new
   microservice was considered and rejected.
+- **Sales Agent Onboarding is a new workflow in sales-service —
+  initiation, approval with customizable levels and assigned roles, and
+  provisioning of the real agent.** There had never been a create-agent
+  pathway at all before this; every `agent_master` row came from a seed
+  file. This is also the first real use of `approval_matrix`'s
+  `approval_level_2_role_id`/`approval_level_3_role_id` columns and
+  `checkApprovalAuthority`'s multi-stage `hasNextStage` logic — both
+  have existed since the approval-matrix mechanism first shipped, but
+  every prior module (Procurement/Accounting/Fleet/Expense) only ever
+  populated a single level per band, so the stage-advancement path had
+  only ever been unit-tested, never exercised by a real second approver.
+  A new `agent_onboarding_requests` table (migration 032) routes through
+  a new `approval_matrix` band (module `SALES`, transaction type
+  `AGENT_ONBOARDING`): below 200,000 requested trading capital, one
+  Procurement Manager sign-off is enough; at or above, a Procurement
+  Manager AND, sequentially after, a Finance Controller are both
+  required — a real, tenant-configurable difference in how many levels a
+  request needs, needing zero changes to `checkApprovalAuthority` or any
+  `approve()` method's shape, since the machinery was already generic,
+  just dormant. Final-stage approval provisions a real `agent_master`
+  row inside the same transaction. Verified for real: a single-level
+  150,000 request provisions immediately; a two-level 450,000 request's
+  first approval only advances the stage (confirmed no agent exists
+  yet), a same-tier second attempt is correctly denied at stage 2, and
+  the correct tier (`FINANCE_CONTROLLER`) completes it — a direct `psql`
+  query confirms the real, `ACTIVE` agent row; reject stops the chain at
+  any stage with zero agents created; RLS blocks cross-tenant reads. The
+  mobile Approvals tab gained a sixth section, including a bespoke
+  handler for the one action on the tab where a single approve tap
+  doesn't necessarily mean "done" — it shows "awaiting a further
+  sign-off" when a further stage remains, "Agent provisioned." when it's
+  actually done. This pass also replayed CI's exact migration-then-seed
+  sequence against a disposable Postgres container BEFORE committing —
+  the lesson from Expense Management's CI failure — so no `approval_
+  matrix` seed row lives inside the migration itself. See
+  `docs/RUNBOOK.md`'s "Sales Agent Onboarding" section for the full
+  trail.
 - **Automated test coverage now spans every part of the platform — all 8
   Node services, the Go `ledger-service`'s pure logic, procurement-service
   against a real Postgres, and the Flutter mobile app — but is uneven by

@@ -277,6 +277,7 @@ class _HomeScreen extends StatelessWidget {
               accountingApi: accountingApi,
               fleetApi: fleetApi,
               manufacturingApi: manufacturingApi,
+              salesApi: salesApi,
             ),
           ],
         ),
@@ -1239,11 +1240,13 @@ class _ApprovalsTab extends StatefulWidget {
     required this.accountingApi,
     required this.fleetApi,
     required this.manufacturingApi,
+    required this.salesApi,
   });
   final ApiClient procurementApi;
   final ApiClient accountingApi;
   final ApiClient fleetApi;
   final ApiClient manufacturingApi;
+  final ApiClient salesApi;
 
   @override
   State<_ApprovalsTab> createState() => _ApprovalsTabState();
@@ -1255,6 +1258,7 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
   List<Map<String, dynamic>> _maintenanceRequests = [];
   List<Map<String, dynamic>> _productionBatches = [];
   List<Map<String, dynamic>> _expenseRequests = [];
+  List<Map<String, dynamic>> _agentOnboardingRequests = [];
   bool _loading = true;
   String? _loadError;
 
@@ -1273,6 +1277,7 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
         widget.fleetApi.fetchMaintenanceRequests(),
         widget.manufacturingApi.fetchProductionBatches(),
         widget.accountingApi.fetchExpenseRequests(),
+        widget.salesApi.fetchAgentOnboardingRequests(),
       ]);
       setState(() {
         _purchaseOrders = results[0].where((r) => r['approvalStatus'] == 'PENDING').toList();
@@ -1280,6 +1285,7 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
         _maintenanceRequests = results[2].where((r) => r['requestStatus'] == 'PENDING_APPROVAL').toList();
         _productionBatches = results[3].where((r) => r['cost_review_status'] == 'PENDING_APPROVAL').toList();
         _expenseRequests = results[4].where((r) => r['status'] == 'PENDING_APPROVAL').toList();
+        _agentOnboardingRequests = results[5].where((r) => r['status'] == 'PENDING_APPROVAL').toList();
         _loadError = null;
         _loading = false;
       });
@@ -1338,6 +1344,30 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
       () => widget.procurementApi.rejectPurchaseOrder(po['poId'] as String, reasonCode),
       'Purchase order rejected.',
     );
+  }
+
+  /// Agent Onboarding is the one workflow on this tab where a single
+  /// approve tap doesn't necessarily mean "done" — a real two-level
+  /// approval_matrix band (governance_seed.sql) means a large-capital
+  /// request needs a SECOND sign-off from a different role before it's
+  /// actually provisioned. The response's own status/currentApprovalStage
+  /// says which happened; this picks the right SnackBar message rather
+  /// than the fixed one `_act` shows for every other action on this tab.
+  Future<void> _approveAgentOnboarding(Map<String, dynamic> req) async {
+    try {
+      final result = await widget.salesApi.approveAgentOnboarding(req['onboardingRequestId'] as String);
+      if (!mounted) return;
+      final message = result['status'] == 'PROVISIONED'
+          ? 'Agent provisioned.'
+          : 'Approved — awaiting a further sign-off (stage ${result['currentApprovalStage']}).';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Action failed: $e'), backgroundColor: Colors.red),
+      );
+    }
   }
 
   @override
@@ -1438,6 +1468,22 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
           onReject: () => _act(
             () => widget.accountingApi.rejectExpenseRequest(er['expenseRequestId'] as String),
             'Expense request rejected.',
+          ),
+        );
+      }));
+    }
+
+    if (_agentOnboardingRequests.isNotEmpty) {
+      sections.add(_sectionHeader('Agent Onboarding (${_agentOnboardingRequests.length})'));
+      sections.addAll(_agentOnboardingRequests.map((req) {
+        final stage = req['currentApprovalStage'];
+        return _approvalTile(
+          title: '${req['agentName']} (${req['agentCode']})',
+          subtitle: 'Requested capital: ${req['requestedTradingCapital']} — stage $stage',
+          onApprove: () => _approveAgentOnboarding(req),
+          onReject: () => _act(
+            () => widget.salesApi.rejectAgentOnboarding(req['onboardingRequestId'] as String),
+            'Agent onboarding request rejected.',
           ),
         );
       }));

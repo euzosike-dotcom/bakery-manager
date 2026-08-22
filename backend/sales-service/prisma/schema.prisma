@@ -52,6 +52,29 @@ model AgentMaster {
   @@map("agent_master")
 }
 
+// Sales Agent Onboarding (migration 032) — this service's own table.
+model AgentOnboardingRequest {
+  tenantId                  String   @map("tenant_id") @db.Uuid
+  onboardingRequestId       String   @map("onboarding_request_id") @db.Uuid
+  agentCode                 String   @map("agent_code")
+  agentName                 String   @map("agent_name")
+  agentType                 String   @map("agent_type")
+  plantId                   String   @map("plant_id") @db.Uuid
+  requestedTradingCapital   Decimal  @map("requested_trading_capital") @db.Decimal(14, 2)
+  capitalCap                Decimal? @map("capital_cap") @db.Decimal(14, 2)
+  baseDiscountPercent       Decimal  @map("base_discount_percent") @db.Decimal(5, 2)
+  status                    String
+  currentApprovalStage      Int      @default(1) @map("current_approval_stage")
+  pendingApproverRoleId     String?  @map("pending_approver_role_id") @db.Uuid
+  agentId                   String?  @map("agent_id") @db.Uuid
+  submittedByUserId         String?  @map("submitted_by_user_id") @db.Uuid
+  createdAt                 DateTime @default(now()) @map("created_at")
+
+  @@id([tenantId, onboardingRequestId])
+  @@unique([tenantId, agentCode])
+  @@map("agent_onboarding_requests")
+}
+
 model TradingCapitalLedger {
   tenantId      String   @map("tenant_id") @db.Uuid
   tclEntryId    String   @map("tcl_entry_id") @db.Uuid

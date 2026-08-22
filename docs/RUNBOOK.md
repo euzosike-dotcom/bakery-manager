@@ -5569,3 +5569,134 @@ needed only three new methods on it):
 - Only one approval_matrix band split was seeded (0–20,000 /
   20,000+) — reasonable default, not a business requirement the user
   specified; trivially re-seeded via SQL if a real threshold is known.
+
+## Sales Agent Onboarding — the first real two-level approval chain
+
+Explicit user request: initiation, "approval (customizable levels and
+assigned roles for approval)," and provisioning of a Sales Agent. Lives
+in sales-service — it owns `agent_master` (migration 010), and there
+had never been a create-agent pathway at all before this
+(`agents.controller.ts` was list/capital-status only; every
+`agent_master` row so far came from a seed file, never the API).
+
+### 1. "Customizable levels and assigned roles" was already built, never used
+
+`approval_matrix` has carried `approval_level_1_role_id`,
+`approval_level_2_role_id`, and `approval_level_3_role_id` since
+migration 003, and `checkApprovalAuthority` has resolved `stage`
+against whichever of those three a band populates since the approval-
+matrix pass first shipped (`roleIdForStage`, `hasNextStage = stage < 3
+&& roleIdForStage(band, stage + 1) !== null`). Every module that has
+used this mechanism so far — Procurement/Accounting/Fleet/Expense —
+only ever populated `approval_level_1_role_id` on any given band, so
+`hasNextStage` had only ever evaluated to `false` in this platform's
+entire history; the stage-advancement branch of every prior module's
+`approve()` was unit-tested but never exercised by a real second human
+approver. Agent Onboarding is the first band to populate a second level
+for real (`governance_seed.sql`): below 200,000 requested trading
+capital, a Procurement Manager's sign-off alone is enough (single-level,
+same shape as every other module); at or above it, a Procurement
+Manager AND, sequentially after, a Finance Controller are both required.
+This is "customizable levels" exactly as asked — a real, tenant-
+configurable difference in HOW MANY approvals a request needs, not
+just which single role — and needed zero changes to
+`checkApprovalAuthority` or any `approve()` method's shape to support;
+the machinery was already generic, just dormant.
+
+### 2. Schema and service (migration 032)
+
+`agent_onboarding_requests` — the same `PENDING_APPROVAL`/`<terminal>`/
+`REJECTED` + `current_approval_stage`/`pending_approver_role_id` shape
+every other approval_matrix module's request table has (`PROVISIONED`
+here instead of `POSTED`, since nothing is "posted" to a ledger — an
+agent is provisioned). `agent_id` is populated only once provisioned —
+the real, auditable link to the row it caused, same pattern
+`expense_requests.journal_entry_id` established. `AgentOnboardingService
+.approveOnboarding` needed no special-casing for the two-level case:
+`if (result.hasNextStage)` just bumps `current_approval_stage` and
+returns, exactly like every prior module's `approve()` already did —
+this pass simply gave that branch a seeded band that actually takes it.
+Only at the FINAL stage does it provision: a real `agent_master` INSERT
+(`agentStatus: 'ACTIVE'`, `approvedTradingCapital` from the request)
+inside the same transaction that marks the request `PROVISIONED` —
+`sales_svc` already had `SELECT, INSERT, UPDATE` on `agent_master`
+itself (migration 011), so only the new table needed a grant. `plantId`
+is validated the same way `sales.service.ts`'s own `createSalesOrder`
+already validates it — not at all at the application layer; the real
+`FOREIGN KEY (tenant_id, plant_id) REFERENCES plants` constraint is the
+enforcement, consistent with the one existing precedent in this exact
+service rather than introducing a new one.
+
+### 3. Verification — real Keycloak users, a real two-stage chain, a real provisioned agent
+
+Against the live dev app and database:
+
+1. **Single-level band provisions immediately**: Chidinma
+   (`PROCUREMENT_MGR`) submits and approves a 150,000-capital request
+   (AG-0002) → `201`, `status: PROVISIONED`, a real `agent_master` row
+   appears in `GET /agents` with the exact requested capital.
+2. **Two-level band — stage 1 only advances, no agent yet**: Chidinma
+   approves a 450,000-capital request (AG-0003) at stage 1 → `status`
+   stays `PENDING_APPROVAL`, `currentApprovalStage: 2`, `agentId: null`
+   — confirmed no `agent_master` row exists yet.
+3. **Wrong-tier denied at stage 2**: Chidinma tries the SAME request
+   again → real `403` naming stage 2 explicitly, not a generic denial.
+4. **Correct-tier completes it**: Tunde (`FINANCE_CONTROLLER`) approves
+   at stage 2 → `201`, `status: PROVISIONED`, a real `agent_id` — a
+   direct `psql` query confirms the real `agent_master` row, `ACTIVE`,
+   with the exact requested capital and discount.
+5. **Reject stops the chain at any stage**: a third 600,000 request
+   rejected by Chidinma at stage 1 (within her tier — rejecting is the
+   same tier-check as approving, not a higher bar) → `REJECTED`,
+   confirmed zero matching `agent_master` rows.
+6. RLS blocks cross-tenant reads on the new table (`count = 0` for a
+   foreign `app.tenant_id`).
+7. **The mobile Approvals tab, end to end, including the two-stage UX**:
+   a new "Agent Onboarding" section shows a fresh request with its
+   current stage in the subtitle; Chidinma's stage-1 approve shows
+   "Approved — awaiting a further sign-off (stage 2)" and the item
+   correctly STAYS in the list (still `PENDING_APPROVAL`) with its
+   stage now reading 2; her stage-2 attempt surfaces the real `403` via
+   `SnackBar`; logging out and back in as Tunde, his stage-2 approve
+   shows "Agent provisioned." and the item disappears. This needed one
+   new bespoke handler (`_approveAgentOnboarding`, mirroring
+   `_rejectPurchaseOrderWithReason`'s precedent for tab actions that
+   need more than the generic `_act` helper's fixed message) since this
+   is the only action on the tab where a single tap doesn't necessarily
+   mean "done."
+8. Jest: 7 new tests (`agent-onboarding.service.spec.ts`) covering the
+   404/not-pending guards, single-level immediate provisioning, and —
+   the two cases that matter most, since nothing in this platform had
+   ever exercised them — a stage-1 approval that only advances with NO
+   `agentMaster.create` call, and a stage-2 approval that's what
+   actually calls it. All 14 of sales-service's tests pass;
+   `flutter analyze`/`flutter test` both clean (12/12).
+9. **Migration verified against a fresh database before committing**,
+   not after — replayed CI's exact migration-then-seed sequence against
+   a disposable Postgres container up front this time (the lesson from
+   the Expense Management pass's CI failure): every `approval_matrix`/
+   role-id-bearing seed row lives in `governance_seed.sql`, nothing in
+   migration 032 itself references a literal tenant.
+
+### Known gaps after this pass
+
+- No mobile capture screen for SUBMITTING an onboarding request —
+  creation is curl-proven only, the same scope decision already made
+  twice (`maintenance_requests`, Expense Requests): the Approvals tab
+  reviews and decides, it doesn't originate requests.
+- `agent_code` uniqueness is enforced only by the table's own UNIQUE
+  constraint, not a pre-check with a clean 400 — same precedent this
+  codebase already follows elsewhere (no service catches Prisma's
+  P2002 and rethrows it); a duplicate `agent_code` submission gets
+  whatever NestJS's default exception filter produces, not a curated
+  error message.
+- Only one approval_matrix band split was seeded (0–200,000 /
+  200,000+) — reasonable default demonstrating the mechanism, not a
+  business requirement the user specified; trivially re-seeded via SQL,
+  including adding a real third level (`approval_level_3_role_id`) if a
+  tenant ever needs one — the schema and `checkApprovalAuthority` both
+  already support it, unexercised only for lack of a seeded band.
+- No way to edit or deactivate an `agent_master` row through the API
+  once provisioned (mirrors the pre-existing gap that `agents.
+  controller.ts` was read-only before this pass too) — provisioning is
+  new; managing an agent's status/capital after the fact is not.
