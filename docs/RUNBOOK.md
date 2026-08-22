@@ -4220,10 +4220,8 @@ Against the actual dev database, not mocks:
   of them; a tenant configured with one today would queue rows forever
   with nothing to consume them, exactly the bug this pass just fixed for
   `CUSTOM_MODULE`.
-- No dead-letter reprocessing UI — `failed_posting_review` rows can be
-  read via SQL but there's no endpoint to retry or resolve one; the
-  review table exists (shared with ledger-service's own failure class)
-  but nothing acts on `review_status = OPEN` yet.
+- No dead-letter reprocessing UI or API. (Closed — see "Finance
+  connector dead-letter path" below.)
 - Poll interval and batch size are fixed dev-appropriate defaults
   (5000ms / 20 rows per tenant per tick), not tuned against any real
   production volume or SLA.
@@ -5037,3 +5035,126 @@ correctly showed `source_module = sales`.
   receivable — `customer_invoices.due_date` exists and is set, but
   nothing reads it to flag or block an overdue direct-sale customer the
   way agent capital blocks an over-exposed agent.
+
+## Finance connector dead-letter path
+
+The finance connector pass left one known gap open: `failed_posting_
+review` rows (`FinanceConnectorService`'s own escalation after 3
+exhausted retries, see the "Finance connector" section above) were
+queryable via `psql` but nothing could act on one from the API. This
+pass closes it.
+
+### 1. `ReviewService` — a new module, `can_override` gating
+
+`backend/finance-connector-service/src/review/` — a new module
+alongside the existing `sync/` (the poller) and `postings/` (read-only
+list). `GET /failed-postings` lists `OPEN` reviews; `POST
+/failed-postings/:reviewId/retry` and `.../dismiss` are gated by a new
+`checkAuthority` call this service never made before (it needed its own
+Keycloak M2M client, `finance-connector-service`, added to governance-
+service's `M2M_ALLOWED_CLIENT_IDS` — the 7th, same pattern every prior
+M2M-auth extension in this platform has followed).
+
+`requiredPermission: 'can_override'`, not `can_post` — the first place
+in this whole platform that actually requires it. `can_override` has
+existed on `roles` since governance-service's very first migration
+(003_governance.sql), alongside `can_approve`/`can_post`, but every
+online-only finance action built so far (bill payment, invoice payment,
+NCR verify, manual journal entry, payroll posting, period-close) gates
+on `can_post` — none of them needed a THIRD tier of permission until
+now. Acting on a dead-lettered item — telling the connector "try this
+again" or "give up on this one" — is semantically an override of the
+connector's own automated give-up decision, a different kind of action
+from "record this legitimate transaction," and `can_override` is the
+permission this platform already modeled for exactly that distinction.
+In the seeded dev roles, only `FINANCE_CONTROLLER` has it —
+`PROCUREMENT_MGR` does not, giving a real wrong-tier/correct-tier pair
+to verify against, same as every other authority check in this
+platform.
+
+### 2. Retry has to know which failure class it's looking at
+
+`failed_posting_review` has two independent writers: this service's own
+`FinanceConnectorService` (after 3 exhausted sync attempts, `external_
+system = 'CUSTOM_MODULE'` on the linked `integration_queue` row), and
+`ledger-service`'s Go `PostingEngine.recordFailure` (a completely
+different failure class — "no posting rule configured for this event
+type" — `external_system = 'NONE'`). Both write to the same table
+because it already existed for this purpose before the finance
+connector was built.
+
+`retry` only ever means one concrete thing here: reset the linked
+`integration_queue` row to `PENDING` (`retryCount = 0`) so this
+service's own poller picks it back up on its next cycle. That mechanism
+only works for rows this connector's poller actually reads
+(`externalSystem = 'CUSTOM_MODULE'`) — resetting a `ledger-service`-class
+row to `PENDING` would be a silent no-op, since nothing anywhere
+re-reads it (`ledger-service` doesn't poll `integration_queue`; the
+original Kafka message that caused the failure is long gone). `retry`
+checks `queueRow.externalSystem` explicitly and rejects with a clear
+`400` rather than letting that happen quietly. `dismiss` has no such
+restriction — marking any `OPEN` review `RESOLVED` without retrying is
+a legitimate action regardless of which system caused the failure, so a
+`ledger-service`-class review can still be dismissed (just never
+retried) through this same API.
+
+### 3. Verification — real dead-lettered rows, both failure classes, both tiers
+
+Against the real dev database, which already had two genuine `ledger-
+service`-class `failed_posting_review` rows sitting `OPEN` from earlier
+sessions (a payroll-posting amount-expression failure, unrelated to
+this pass) plus freshly forced ones of this connector's own:
+
+1. `GET /failed-postings` with a real Keycloak token listed all `OPEN`
+   reviews, both failure classes together.
+2. Wrong-tier: `chidinma.eze@metrock.dev` (`PROCUREMENT_MGR`, no
+   `can_override`) attempting `dismiss` on a real review correctly got a
+   real `403` — the first live exercise of `can_override` denial
+   anywhere in this platform.
+3. Correct-tier: `tunde.bakare@metrock.dev` (`FINANCE_CONTROLLER`)
+   dismissed that same review successfully — `201`, `review_status`
+   flips to `RESOLVED` with a real `reviewed_by`/`reviewed_time`.
+4. Cross-failure-class rejection: attempting `retry` against one of the
+   pre-existing real `ledger-service`-class rows (`external_system =
+   NONE`) correctly returned a real `400` naming the mismatch, with
+   neither the queue row nor the review touched — confirmed directly
+   against the database, not just the HTTP response.
+5. A genuine retry-to-success round trip: forced a fresh `CUSTOM_MODULE`
+   failure (a queue row pointing at a nonexistent `journal_entry_id`,
+   exhausting all 3 real retries into `FAILED` + a new `OPEN` review,
+   the same forcing technique the original finance connector pass
+   established), corrected the row's `source_record_id` to a real
+   journal entry (simulating the kind of out-of-band data fix a human
+   would make before asking for a retry), then called `retry` — the
+   review immediately flipped to `RESOLVED`, and the poller's very next
+   cycle (a few seconds later) picked the row back up and posted it
+   successfully for real: `queue_status = POSTED`, a real `posted_
+   external_id`, confirmed by direct query, not assumed from the retry
+   call's own response.
+6. Jest suite (`review.service.spec.ts`, 6 tests, mocked Prisma): the
+   full retry success path with exact assertions on both the
+   `integration_queue` and `failed_posting_review` updates; the cross-
+   failure-class rejection (asserting neither table is touched, not
+   just that an exception is thrown); rejecting a retry/dismiss against
+   an already-`RESOLVED` review; and 404s for a missing review.
+
+### Known gaps after this pass
+
+- `retry` re-queues the EXACT same row (same `source_record_id`,
+  unchanged) — there's no way to correct a row's underlying data through
+  this API; whatever needs fixing (as in step 5 of verification above)
+  has to happen out of band, directly against the database, before
+  retry is called. A real back-office tool would probably want to edit-
+  and-retry in one step.
+- No reason/note field captures WHY a human retried or dismissed
+  something beyond what governance-service's `audit_log` already
+  records automatically (who, when, which review) — deliberately not
+  added; `failed_posting_review.error_message` already explains the
+  failure itself, and adding a redundant free-text column for the
+  human's own reasoning felt like scope this gap didn't actually need.
+- `ledger-service`-class reviews can be dismissed through this API but
+  never retried (by design, see above) — there's still no way to
+  re-process one of THOSE failures at all, from any API; the underlying
+  issue (a missing `posting_rules` row) has to be fixed by configuring
+  the rule, and even then nothing automatically reprocesses the
+  original failed event, since the Kafka message itself is gone.

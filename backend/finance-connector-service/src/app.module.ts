@@ -10,6 +10,7 @@ import {
 import { PrismaModule } from './common/prisma.module';
 import { FinanceConnectorModule } from './sync/finance-connector.module';
 import { PostingsModule } from './postings/postings.module';
+import { ReviewModule } from './review/review.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { PostingsModule } from './postings/postings.module';
     PrismaModule,
     FinanceConnectorModule,
     PostingsModule,
+    ReviewModule,
   ],
 })
 export class AppModule implements NestModule {

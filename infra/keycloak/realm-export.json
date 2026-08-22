@@ -168,6 +168,19 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "secret": "manufacturing-service-m2m-dev-secret"
+    },
+    {
+      "clientId": "finance-connector-service",
+      "name": "finance-connector-service (machine-to-machine, client-credentials grant)",
+      "description": "Real M2M auth for PostingAuthorityClient's calls to governance-service's /authorization-check (docs/RUNBOOK.md's finance connector dead-letter section — the retry/dismiss endpoints on failed_posting_review, checkAuthority with can_override only, never checkApprovalAuthority). Client id doubles as the token's azp claim, which governance-service checks against its caller allow-list.",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "finance-connector-service-m2m-dev-secret"
     }
   ],
   "components": {

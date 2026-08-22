@@ -190,6 +190,27 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   including why a naive `.create()` + catch-the-duplicate-key-error
   idempotency approach doesn't actually work against Prisma's interactive
   transactions (an `upsert` avoids the problem entirely).
+- **Finance connector's dead-letter path is no longer read-only.**
+  `failed_posting_review` rows could be queried via SQL but nothing could
+  act on one from the API. `finance-connector-service` gained a new
+  `GET /failed-postings` (list `OPEN` reviews) and `POST
+  /failed-postings/:id/retry` / `.../dismiss`, gated by `can_override` —
+  the first real use of that permission field anywhere in this platform
+  (every other online-only finance action gates on `can_post`; roles have
+  carried `can_override` since governance-service shipped, but nothing
+  ever required it until this). Retry explicitly refuses to act on a
+  review whose `integration_queue` row belongs to a DIFFERENT failure
+  class — `ledger-service`'s own Go posting engine writes to this same
+  table for "no posting rule configured" failures, `external_system =
+  'NONE'` — since resetting one of those to `PENDING` would be a silent
+  no-op nothing ever re-processes, not a real retry. Verified for real
+  against actual dead-lettered rows already sitting in the dev database:
+  a wrong-tier user got a real `403`; the correct tier dismissed one
+  cleanly; an attempted retry against a real `ledger-service`-class row
+  was correctly rejected; and a genuinely recoverable failure, retried
+  after fixing its underlying data, was picked up by the poller on its
+  very next cycle and posted successfully. See `docs/RUNBOOK.md`'s
+  "Finance connector dead-letter path" section for the full trail.
 - **Multi-tenancy isolation tiers**: only the "Pool" tier (shared schema +
   RLS) is implemented. Schema-per-tenant ("Bridge") and database-per-tenant
   ("Silo") provisioning are not built yet.
