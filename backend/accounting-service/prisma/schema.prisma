@@ -44,13 +44,15 @@ model PostingRule {
 }
 
 model JournalEntry {
-  tenantId        String   @map("tenant_id") @db.Uuid
-  journalEntryId  String   @map("journal_entry_id") @db.Uuid
-  sourceEventId   String   @map("source_event_id") @db.Uuid
-  sourceModule    String   @map("source_module")
-  postingDate     DateTime @map("posting_date")
-  status          String
-  memo            String?
+  tenantId               String   @map("tenant_id") @db.Uuid
+  journalEntryId         String   @map("journal_entry_id") @db.Uuid
+  sourceEventId          String   @map("source_event_id") @db.Uuid
+  sourceModule            String   @map("source_module")
+  postingDate             DateTime @map("posting_date")
+  status                  String
+  memo                    String?
+  currentApprovalStage    Int      @default(1) @map("current_approval_stage")
+  pendingApproverRoleId   String?  @map("pending_approver_role_id") @db.Uuid
 
   lines JournalLine[]
 

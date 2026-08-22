@@ -2425,9 +2425,8 @@ cleanly.
 
 ### Known gaps after this pass
 
-- Only Procurement POs are wired up. Manufacturing, Accounting, and Fleet
-  have no amount-routed approval flow — only the binary posting-authority
-  gate from the earlier retrofit.
+- Only Procurement POs are wired up. (Closed — see "Approval-matrix
+  enforcement — expansion beyond Procurement" further down.)
 - No multi-stage escalation has actually been exercised — the mechanism is
   stage-aware (`hasNextStage`, `approval_level_2/3_role_id`) from day one,
   but no seed data populates a second or third tier yet, so it's untested
@@ -4045,3 +4044,186 @@ proving the restore path actually works, not just that `pg_dump` exits
 - Not part of `.github/workflows/ci.yml` — same reasoning as every
   other dev-stack infra pass; this is an operational script, not
   something the automated test suite exercises on every push.
+
+## Approval-matrix enforcement — expansion beyond Procurement
+
+The gap left open above: `checkApprovalAuthority` only ever resolved
+Procurement PO amounts. This pass asked whether the same amount-routed
+tiering makes sense anywhere else and, deliberately, didn't assume the
+answer is "wire it in identically everywhere." Three modules were chosen —
+Accounting, Fleet, Manufacturing — and each required its own real look at
+whether it even has a natural fit, not a mechanical copy-paste of
+Procurement's shape.
+
+### 1. Why Manufacturing doesn't fit the Procurement shape at all
+
+Every other candidate module has an obvious amount-bearing, pre-posting,
+two-party transaction: a journal entry, a maintenance bill. Manufacturing's
+`production_batches` doesn't — batch close is offline-capturable (a
+production operator closes a batch on a device with no guaranteed
+connectivity) and, per the posting-authority retrofit above, is
+deliberately NOT gated behind any authority check, online or offline,
+because gating an offline-capturable action would require a synchronous
+network call mid-capture. There is no natural moment to insert "wait for
+approval before this posts."
+
+The resolution: don't gate the post. Batch close still posts unconditionally
+and immediately, exactly as before this pass. Separately, it now computes
+`batch_cost = actualOutputQty * recipeVersion.standardCost` (an existing
+field — `recipe_versions.standard_cost`, already "cost per unit of output"
+— so this needed zero new pricing logic) and does a plain, read-only
+`$queryRaw` lookup against `approval_matrix` for a `MANUFACTURING`/
+`BATCH_COST` band matching that cost. `checkApprovalAuthority` itself is
+deliberately NOT used for this lookup: its fail-closed behavior on "no
+matching band" (`NO_APPROVAL_MATRIX_CONFIGURED`) is correct for Procurement,
+where every amount must land in some band, but wrong here, where MOST
+batches fall below the single seeded band and "no match" simply means "no
+review needed" — using the fail-closed check would have turned nearly
+every batch close into a spurious denial. `manufacturing_svc` was granted
+plain `SELECT` on `approval_matrix` (migration 024) for this.
+
+The result is a genuinely different shape: `cost_review_status`
+(`NOT_REQUIRED` / `PENDING_APPROVAL` / `APPROVED` / `REJECTED`) is
+retrospective, not gating. `POST /production-batches/:batchId/approve` and
+`.../reject` — which DO call the real `checkApprovalAuthority`, since by
+this point it's a genuine per-user authority decision, not a threshold
+lookup — never affect what already posted; they only ever move
+`cost_review_status`. The seeded band is deliberately single-tier and
+high (150,000+, `FINANCE_CONTROLLER` only) rather than mirroring
+Procurement's full-range two-tier bands, since review here is meant to
+catch the unusual expensive batch, not gate routine ones.
+
+### 2. Why Accounting and Fleet DO fit, and the schema decision each forced
+
+Both have the same shape Procurement does — a discrete amount proposed by
+one person, decided by another, before it takes effect — so both got the
+full two-party workflow: creation/submission calls no authority check,
+only `approve`/`reject` do, and `reject` requires the identical tier-check
+as `approve` (the same precedent as Procurement's own reject).
+
+**Accounting** (`journal_entries`, migration 022) forced a real decision
+Procurement never had to make. A PO can sit `po_status = OPEN` while
+`approval_status = PENDING` — fulfillment and approval are independent
+columns tracking independent concerns. A journal entry can't: it IS the
+ledger (`reports.service.ts`'s trial balance sums `journal_lines` directly),
+so it cannot exist in a POSTED-but-unapproved state without corrupting the
+report. `status` itself therefore now carries `PENDING_APPROVAL` and
+`REJECTED` as first-class values (new default: `PENDING_APPROVAL`), rather
+than adding a redundant column that duplicates what `status` already means
+for this table. `createManualJournalEntry` no longer calls any authority
+check at all — it just creates with `status: PENDING_APPROVAL` — and
+`reports.service.ts`'s trial-balance query was changed to filter
+`journalEntry: { status: 'POSTED' }` instead of summing every entry
+regardless of status, which is the actual correctness fix this pass made
+to real financial reporting (verified below, not assumed).
+
+**Fleet** (`maintenance_requests`, migration 023) is the closest match to
+Procurement structurally. The old `completeMaintenanceRequest` (single
+step, immediately `COMPLETED`, immediately published
+`fleet.maintenance_completed.v1` — the event that triggers GL posting) is
+now `submitMaintenanceRequest`: same route (`POST
+:maintenanceRequestId/complete`, same DTO), but now records
+`partsCost`/`labourCost`, moves to `PENDING_APPROVAL`, and does NOT publish
+anything yet. The Kafka publish — the actual GL-posting trigger — only
+happens inside `approveMaintenanceCompletion`, after `checkApprovalAuthority`
+succeeds and there's no next stage, so a rejected or still-pending
+completion can never post to the GL.
+
+### 3. Two real bugs, found only by hitting a live database
+
+Both of Phase 1-2's mocked unit-test suites stub Prisma entirely and
+cannot catch either of these — they only surfaced from real curl calls
+against real running services with a real Postgres behind them.
+
+- **`accounting_svc` had no `UPDATE` grant on `journal_entries`.** Correct
+  historically — before this pass, an entry was created once, immediately
+  `POSTED`, and never touched again, so migration 015's `GRANT SELECT,
+  INSERT` was sufficient at the time. The first live approve call after
+  this pass's changes returned a real `42501 permission denied for table
+  journal_entries` — not a TypeScript error, not a failing unit test, a
+  live Postgres privilege check. Fixed by adding `GRANT UPDATE ON
+  journal_entries TO accounting_svc;` to migration 022 (with the failure
+  documented directly in the migration's own comment), applied live, and
+  the same approve call retried successfully.
+- **BigInt/JSON.stringify crash on manufacturing-service's first
+  `sync_seq`-returning GET endpoint.** `findAllBatches` (new — the first
+  endpoint in this service ever exposing the `production_batches` list)
+  reads `sync_seq` via `$queryRaw`, which returns Postgres `bigserial`
+  columns as native JS `BigInt`; Nest's default response serializer calls
+  `JSON.stringify` on the way out, which throws `TypeError: Do not know
+  how to serialize a BigInt` — a runtime failure at response-send time,
+  invisible to `tsc`. This is the identical class of bug `crm-service`'s
+  `ActivitiesService.findAll` hit first, earlier in this platform's
+  history; fixed with the identical established pattern (`.map(r => ({
+  ...r, sync_seq: typeof r.sync_seq === 'bigint' ? r.sync_seq.toString() :
+  r.sync_seq }))`), plus a new regression test in
+  `production.service.spec.ts` that asserts `JSON.stringify(result)`
+  doesn't throw — mirroring CRM's own regression test for the same bug.
+
+### 4. `manufacturing-service`'s new M2M client
+
+`manufacturing-service` never called `governance-service` before this pass
+(batch close was never gated), so it needed its own confidential Keycloak
+client (`manufacturing-service`, `serviceAccountsEnabled: true`) — the
+sixth, following the exact pattern the earlier M2M-auth pass established
+for procurement/sales/accounting/fleet/hr. Added to
+`governance-service`'s `M2M_ALLOWED_CLIENT_IDS` allow-list, and
+`GOVERNANCE_BASE_URL`/`M2M_CLIENT_ID`/`M2M_CLIENT_SECRET` added to
+`manufacturing-service`'s own `.env`/`.env.example`.
+
+### 5. Verification — real Keycloak tokens, real data, all three modules
+
+Using the same `metrock-test-client` password-grant minting as every prior
+pass, against chidinma (`PROCUREMENT_MGR`), tunde (`FINANCE_CONTROLLER`),
+and amaka (`STORES_CLERK`, `can_approve=false`):
+
+**Accounting**: created a low entry (30,000, below the 50,000 threshold)
+and a high one (80,000, at/above it). Confirmed via a real trial-balance
+call that the pending entry is excluded (427,200 total) and, once
+approved by the correct tier, included with an exact match (457,200 —
+the 30,000 delta). The high entry was denied `403` by chidinma (wrong
+tier) and approved `201` by tunde (correct tier).
+
+**Fleet**: inserted a fresh `OPEN` maintenance request (none existed in
+seed data), submitted with a real cost (7,000, below the 15,000
+threshold) → correctly `PENDING_APPROVAL` with no GL-triggering publish;
+approved by the correct tier (chidinma, since 7,000 is below-threshold) →
+`COMPLETED`, `totalCost` present in the response.
+
+**Manufacturing**: closed a batch whose computed cost (171,000) exceeds
+the single 150,000+ band, confirming via the real API response and a
+direct DB read that the batch posted unconditionally AND was flagged
+`PENDING_APPROVAL` for cost review in the same operation. Chidinma's
+approval attempt was correctly denied `403`
+(`INSUFFICIENT_APPROVAL_TIER`). Tunde's attempt at the correct tier
+returned `AUTHORIZED` and the batch reached a terminal `APPROVED` state —
+confirmed against both the live row (`cost_review_status = APPROVED`,
+`pending_approver_role_id = NULL`) and governance-service's hash-chained
+`audit_log`, which shows exactly the two expected rows for this batch:
+chidinma's `APPROVAL_DENIED` at `21:33:59.196`, immediately followed by
+tunde's successful `APPROVAL_CHECK` at `21:33:59.236`. (A subsequent
+manual re-approval attempt against the same, now-`APPROVED` batch
+correctly returned `400` — not a bug, just confirmation that the terminal
+state holds.)
+
+### Known gaps after this pass
+
+- No multi-stage escalation exercised in any of the three new modules —
+  all seeded bands (Accounting, Fleet, Manufacturing alike) are single-
+  role-per-tier; `hasNextStage` logic is implemented and shared with
+  Procurement's already-tested code path, but nothing here specifically
+  proves a 3-tier escalation end-to-end.
+- Manufacturing's `BATCH_COST` band is a single tier (150,000+ only) —
+  amounts below have no matching row and never trigger review at all,
+  by design; this is intentionally different from Procurement/
+  Accounting/Fleet's full-range coverage and hasn't been re-examined
+  against real production cost data, only the seeded dev threshold.
+- All three modules reuse `PROCUREMENT_MGR`/`FINANCE_CONTROLLER` as their
+  approving roles rather than module-named roles (`FLEET_MANAGER`,
+  `PRODUCTION_MANAGER`) — correct given `checkApprovalAuthority` only
+  ever checks `can_approve` + the matrix's role_id, never a role's name
+  or category, but a real deployment with dedicated fleet/production
+  managers would need its own roles seeded, not a reuse of Procurement's.
+- No plant-specific `approval_matrix` row exists for any of the three new
+  modules either — same gap noted in the original Procurement-only pass,
+  still untested beyond the tenant-wide band.

@@ -18,6 +18,16 @@ interface AccountBalance {
  * are all-time as-of-now snapshots, which is sufficient to prove the
  * pattern but means Balance Sheet's own net income isn't folded into
  * Equity — a known simplification, not a bug in the numbers shown.
+ *
+ * `journalEntry: { status: 'POSTED' }` below matters more than it looks —
+ * migration 022 (approval_matrix expansion, docs/RUNBOOK.md) gave manual
+ * journal entries a `PENDING_APPROVAL` state that has to exist in the same
+ * table these reports already summed unconditionally. Before that
+ * migration this filter was unnecessary (every row was always `POSTED`
+ * the instant it existed); without it now, an entry someone merely
+ * proposed — not yet approved, possibly never approved — would already
+ * be counted in Trial Balance/P&L/Balance Sheet, which is wrong in a way
+ * a reader of these reports would have no way to detect.
  */
 @Injectable()
 export class ReportsService {
@@ -28,7 +38,7 @@ export class ReportsService {
       const accounts = await tx.chartOfAccount.findMany({ where: { tenantId, isActive: true } });
       const sums = await tx.journalLine.groupBy({
         by: ['accountCode'],
-        where: { tenantId },
+        where: { tenantId, journalEntry: { status: 'POSTED' } },
         _sum: { debitAmount: true, creditAmount: true },
       });
       const sumsByCode = new Map(sums.map((s) => [s.accountCode, s]));

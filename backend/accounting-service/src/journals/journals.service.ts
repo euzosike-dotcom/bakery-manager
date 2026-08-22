@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PostingAuthorityClient } from '@metrock/backend-common';
 import { PrismaService } from '../common/prisma.service';
@@ -17,6 +17,14 @@ import { CreateJournalEntryDto } from './dto/journal-entry.dto';
  * `one_sided_line` CHECK from migration 005 is the backstop; this is the
  * same rule enforced earlier so the caller gets a clear 400 instead of a
  * raw constraint-violation error).
+ *
+ * Amount-routed approval (docs/RUNBOOK.md's "approval_matrix expansion"
+ * section, migration 022) — creating an entry only proposes it
+ * (`PENDING_APPROVAL`, no GL effect: reports.service.ts only sums
+ * `POSTED` entries); `approve`/`reject` are what actually decide it,
+ * mirroring procurement-service's PO approve/reject exactly, including
+ * that creation itself calls no authority check at all — only
+ * approve/reject do, via `checkApprovalAuthority`.
  */
 @Injectable()
 export class JournalsService {
@@ -25,7 +33,7 @@ export class JournalsService {
     private readonly postingAuthority: PostingAuthorityClient,
   ) {}
 
-  async createManualJournalEntry(tenantId: string, dto: CreateJournalEntryDto, userId: string | undefined) {
+  async createManualJournalEntry(tenantId: string, dto: CreateJournalEntryDto, _userId: string | undefined) {
     for (const line of dto.lines) {
       const isDebit = line.debitAmount > 0 && line.creditAmount === 0;
       const isCredit = line.creditAmount > 0 && line.debitAmount === 0;
@@ -46,14 +54,6 @@ export class JournalsService {
 
     const journalEntryId = randomUUID();
 
-    await this.postingAuthority.checkAuthority({
-      tenantId,
-      userId,
-      requiredPermission: 'can_post',
-      moduleName: 'ACCOUNTING',
-      recordIdRef: journalEntryId,
-    });
-
     return this.prisma.forTenant(tenantId, async (tx) => {
       const entry = await tx.journalEntry.create({
         data: {
@@ -62,7 +62,7 @@ export class JournalsService {
           sourceEventId: randomUUID(), // no domain event backs a manual entry — a fresh id per entry
           sourceModule: 'accounting_manual',
           postingDate: new Date(),
-          status: 'POSTED',
+          status: 'PENDING_APPROVAL',
           memo: dto.memo,
         },
       });
@@ -85,5 +85,86 @@ export class JournalsService {
         include: { lines: true },
       });
     });
+  }
+
+  private async totalAmount(tenantId: string, journalEntryId: string): Promise<number> {
+    const lines = await this.prisma.forTenant(tenantId, (tx) =>
+      tx.journalLine.findMany({ where: { tenantId, journalEntryId } }),
+    );
+    // Balanced by construction (createManualJournalEntry rejects anything
+    // that doesn't balance) — sum(debit) and sum(credit) are the same
+    // number, either works as "the amount" approval_matrix routes on.
+    return lines.reduce((sum, l) => sum + Number(l.debitAmount), 0);
+  }
+
+  async approveJournalEntry(tenantId: string, journalEntryId: string, userId: string | undefined) {
+    const entry = await this.prisma.forTenant(tenantId, (tx) =>
+      tx.journalEntry.findUnique({ where: { tenantId_journalEntryId: { tenantId, journalEntryId } } }),
+    );
+    if (!entry) throw new NotFoundException(`Journal entry ${journalEntryId} not found`);
+    if (entry.status !== 'PENDING_APPROVAL') {
+      throw new BadRequestException(`Journal entry ${journalEntryId} is not pending approval (status=${entry.status})`);
+    }
+
+    const amount = await this.totalAmount(tenantId, journalEntryId);
+
+    const result = await this.postingAuthority.checkApprovalAuthority({
+      tenantId,
+      userId,
+      moduleName: 'ACCOUNTING',
+      transactionType: 'MANUAL_JOURNAL_ENTRY',
+      recordIdRef: journalEntryId,
+      amount,
+      stage: entry.currentApprovalStage,
+    });
+
+    const nextStage = entry.currentApprovalStage + 1;
+    return this.prisma.forTenant(tenantId, (tx) =>
+      tx.journalEntry.update({
+        where: { tenantId_journalEntryId: { tenantId, journalEntryId } },
+        data: result.hasNextStage ? { currentApprovalStage: nextStage } : { status: 'POSTED', pendingApproverRoleId: null },
+        include: { lines: true },
+      }),
+    );
+  }
+
+  async rejectJournalEntry(tenantId: string, journalEntryId: string, userId: string | undefined) {
+    const entry = await this.prisma.forTenant(tenantId, (tx) =>
+      tx.journalEntry.findUnique({ where: { tenantId_journalEntryId: { tenantId, journalEntryId } } }),
+    );
+    if (!entry) throw new NotFoundException(`Journal entry ${journalEntryId} not found`);
+    if (entry.status !== 'PENDING_APPROVAL') {
+      throw new BadRequestException(`Journal entry ${journalEntryId} is not pending approval (status=${entry.status})`);
+    }
+
+    const amount = await this.totalAmount(tenantId, journalEntryId);
+
+    // Rejecting requires the SAME approval-tier gate as approving — see
+    // procurement-service's rejectPurchaseOrder for the identical
+    // reasoning: a lower-tier approver can reject what they could have
+    // approved, not reject something above their own tier.
+    await this.postingAuthority.checkApprovalAuthority({
+      tenantId,
+      userId,
+      moduleName: 'ACCOUNTING',
+      transactionType: 'MANUAL_JOURNAL_ENTRY',
+      recordIdRef: journalEntryId,
+      amount,
+      stage: entry.currentApprovalStage,
+    });
+
+    return this.prisma.forTenant(tenantId, (tx) =>
+      tx.journalEntry.update({
+        where: { tenantId_journalEntryId: { tenantId, journalEntryId } },
+        data: { status: 'REJECTED', pendingApproverRoleId: null },
+        include: { lines: true },
+      }),
+    );
+  }
+
+  findAll(tenantId: string) {
+    return this.prisma.forTenant(tenantId, (tx) =>
+      tx.journalEntry.findMany({ where: { tenantId }, include: { lines: true }, orderBy: { postingDate: 'desc' } }),
+    );
   }
 }

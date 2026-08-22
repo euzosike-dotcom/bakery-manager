@@ -1,5 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { KafkaProducerService } from '@metrock/backend-common';
+import { KafkaProducerService, PostingAuthorityClient } from '@metrock/backend-common';
 import { ProductionService } from './production.service';
 import { PrismaService } from '../common/prisma.service';
 
@@ -11,6 +11,15 @@ function makePrisma(tx: Record<string, unknown>): PrismaService {
 
 function makeKafka(): KafkaProducerService {
   return { publish: jest.fn().mockResolvedValue(undefined) } as unknown as KafkaProducerService;
+}
+
+// Not exercised by closeProductionBatch itself (that path reads
+// approval_matrix via a plain tx.$queryRaw, not this client — see
+// production.service.ts's comment) — only present because
+// approveBatchCostReview/rejectBatchCostReview need a real constructor
+// argument.
+function makePostingAuthority(): PostingAuthorityClient {
+  return { checkApprovalAuthority: jest.fn() } as unknown as PostingAuthorityClient;
 }
 
 const APPROVED_RECIPE_VERSION = {
@@ -41,6 +50,9 @@ function makeTx(overrides: Record<string, unknown> = {}) {
     recipeVersion: { findUnique: jest.fn().mockResolvedValue(APPROVED_RECIPE_VERSION) },
     productSku: { findUnique: jest.fn().mockResolvedValue({ standardWeightKg: null }) },
     $executeRaw: jest.fn().mockResolvedValue(undefined),
+    // No approval_matrix band matches by default — every existing test
+    // below predates cost review entirely and expects NOT_REQUIRED.
+    $queryRaw: jest.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -48,7 +60,7 @@ function makeTx(overrides: Record<string, unknown> = {}) {
 describe('ProductionService.closeProductionBatch — yield calculation', () => {
   it('computes yield as output/input * 100 directly when the output SKU has no standardWeightKg (already mass-based)', async () => {
     const tx = makeTx({ productSku: { findUnique: jest.fn().mockResolvedValue({ standardWeightKg: null }) } });
-    const service = new ProductionService(makePrisma(tx), makeKafka());
+    const service = new ProductionService(makePrisma(tx), makeKafka(), makePostingAuthority());
 
     // 870 kg output / 348 kg input * 100 = 250% if actualOutputQty were
     // treated as unit count against a mass-based SKU, but here the output SKU
@@ -64,7 +76,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
     // against 348kg of ingredients is meaningless as a raw ratio (250%)
     // unless converted through the SKU's per-unit mass first.
     const tx = makeTx({ productSku: { findUnique: jest.fn().mockResolvedValue({ standardWeightKg: 0.5 }) } });
-    const service = new ProductionService(makePrisma(tx), makeKafka());
+    const service = new ProductionService(makePrisma(tx), makeKafka(), makePostingAuthority());
 
     const result = await service.closeProductionBatch(TENANT, baseDto({ actualOutputQty: 870 }), { createdOffline: false });
 
@@ -77,7 +89,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
       recipeVersion: { findUnique: jest.fn().mockResolvedValue({ ...APPROVED_RECIPE_VERSION, approvalStatus: 'DRAFT' }) },
     });
     const kafka = makeKafka();
-    const service = new ProductionService(makePrisma(tx), kafka);
+    const service = new ProductionService(makePrisma(tx), kafka, makePostingAuthority());
 
     const result = await service.closeProductionBatch(TENANT, baseDto(), { createdOffline: false });
 
@@ -90,7 +102,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
     // 300kg output-equivalent / 348kg input = ~86.2%, below the 90% threshold.
     const tx = makeTx();
     const kafka = makeKafka();
-    const service = new ProductionService(makePrisma(tx), kafka);
+    const service = new ProductionService(makePrisma(tx), kafka, makePostingAuthority());
 
     const result = await service.closeProductionBatch(TENANT, baseDto({ actualOutputQty: 300 }), { createdOffline: false });
 
@@ -106,7 +118,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
       recipeVersion: { findUnique: jest.fn().mockResolvedValue({ ...APPROVED_RECIPE_VERSION, standardCost: 1 }) },
     });
     const kafka = makeKafka();
-    const service = new ProductionService(makePrisma(tx), kafka);
+    const service = new ProductionService(makePrisma(tx), kafka, makePostingAuthority());
 
     await service.closeProductionBatch(TENANT, baseDto(), { createdOffline: false });
 
@@ -118,7 +130,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
       recipeVersion: { findUnique: jest.fn().mockResolvedValue({ ...APPROVED_RECIPE_VERSION, standardCost: 10000 }) },
     });
     const kafka = makeKafka();
-    const service = new ProductionService(makePrisma(tx), kafka);
+    const service = new ProductionService(makePrisma(tx), kafka, makePostingAuthority());
 
     await service.closeProductionBatch(TENANT, baseDto(), { createdOffline: false });
 
@@ -127,7 +139,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
 
   it('rejects a consumption line whose SKU is not part of the pinned recipe version', async () => {
     const tx = makeTx();
-    const service = new ProductionService(makePrisma(tx), makeKafka());
+    const service = new ProductionService(makePrisma(tx), makeKafka(), makePostingAuthority());
 
     await expect(
       service.closeProductionBatch(
@@ -140,7 +152,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
 
   it('404s when the pinned recipe version does not exist', async () => {
     const tx = makeTx({ recipeVersion: { findUnique: jest.fn().mockResolvedValue(null) } });
-    const service = new ProductionService(makePrisma(tx), makeKafka());
+    const service = new ProductionService(makePrisma(tx), makeKafka(), makePostingAuthority());
 
     await expect(service.closeProductionBatch(TENANT, baseDto(), { createdOffline: false })).rejects.toThrow(NotFoundException);
   });
@@ -152,7 +164,7 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
       },
     });
     const kafka = makeKafka();
-    const service = new ProductionService(makePrisma(tx), kafka);
+    const service = new ProductionService(makePrisma(tx), kafka, makePostingAuthority());
 
     const result = await service.closeProductionBatch(TENANT, baseDto({ clientEventId: 'replayed-event' }), {
       createdOffline: false,
@@ -166,5 +178,35 @@ describe('ProductionService.closeProductionBatch — yield calculation', () => {
       message: 'Already applied (idempotent replay)',
     });
     expect(kafka.publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProductionService.findAllBatches — BigInt sync_seq serialization', () => {
+  // Regression test for a real bug found during this platform's build
+  // (docs/RUNBOOK.md's "approval_matrix expansion" section): $queryRaw
+  // returns the bigserial sync_seq column as a native JS BigInt, which
+  // JSON.stringify (and therefore Nest's default response serializer)
+  // throws on at response-send time, not compile time — a type checker
+  // cannot catch it. crm-service's ActivitiesService.findAll hit the
+  // identical gotcha first (see its own regression test); this is the
+  // first GET endpoint in manufacturing-service returning a sync_seq
+  // column at all.
+  it('converts sync_seq from BigInt to string so the response is JSON-serializable', async () => {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([
+        { batch_id: 'batch-1', sync_seq: 42n },
+        { batch_id: 'batch-2', sync_seq: null },
+      ]),
+    };
+    const service = new ProductionService(makePrisma(tx), makeKafka(), makePostingAuthority());
+
+    const result = await service.findAllBatches(TENANT);
+
+    expect(result[0].sync_seq).toBe('42');
+    expect(typeof result[0].sync_seq).toBe('string');
+    expect(result[1].sync_seq).toBeNull();
+    // The real assertion: JSON.stringify must not throw (this is exactly
+    // what failed live — "Do not know how to serialize a BigInt").
+    expect(() => JSON.stringify(result)).not.toThrow();
   });
 });

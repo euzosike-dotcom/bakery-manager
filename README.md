@@ -284,20 +284,46 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   authority retrofit" section for the full verification trail (all six
   endpoints, three scenarios each, plus a fail-closed check with
   governance-service killed).
-- **`approval_matrix` amount-based approval routing is enforced on
-  Procurement POs** — `POST /purchase-orders/:poId/approve` and `.../reject`
-  on procurement-service call `governance-service`'s `POST /approval-check`
-  (`AuthorizationService.checkApprovalAuthority`), which resolves the PO's
-  value against `approval_matrix`'s threshold bands to find the SPECIFIC
-  role required at the PO's current approval stage — a stricter check than
-  the binary `can_approve` flag above, since e.g. both `PROCUREMENT_MGR` and
-  `FINANCE_CONTROLLER` have `can_approve=true` but only one is the correct
-  tier for a given amount. Only wired into Procurement POs so far (the one
-  module whose schema — `purchase_orders.current_approval_stage`,
-  `.pending_approver_role_id` — was designed for it); Manufacturing,
-  Accounting, and Fleet have no amount-routed approval flow yet, only the
-  binary posting-authority gate above. See `docs/RUNBOOK.md`'s
-  "Approval-matrix enforcement" section for the full verification trail.
+- **`approval_matrix` amount-based approval routing now spans Procurement,
+  Accounting, Fleet, and Manufacturing.** `checkApprovalAuthority` resolves
+  a transaction's value against `approval_matrix`'s threshold bands to find
+  the SPECIFIC role required at the current approval stage — a stricter
+  check than the binary `can_approve` flag above, since e.g. both
+  `PROCUREMENT_MGR` and `FINANCE_CONTROLLER` have `can_approve=true` but
+  only one is the correct tier for a given amount. Procurement POs
+  (`purchase_orders`), manual journal entries (`journal_entries`,
+  accounting-service), and maintenance-request completions
+  (`maintenance_requests`, fleet-service) all follow the SAME two-party
+  shape: creation/submission calls no authority check at all, only
+  approve/reject do, and reject requires the identical tier-check as
+  approve (a lower-tier approver can reject what they could approve, not
+  reject above their tier). Manufacturing's `production_batches` is
+  deliberately shaped differently: it has no natural pre-posting
+  amount-bearing transaction (batch close is offline-capturable, and the
+  posting-authority retrofit above already excludes it from any gate on
+  principle), so cost review is RETROSPECTIVE rather than gating — batch
+  close always posts unconditionally and immediately, and separately
+  computes `batch_cost` (`actualOutputQty * recipeVersion.standardCost`,
+  an existing field, no new pricing logic) and does a plain read against
+  `approval_matrix` (not `checkApprovalAuthority`, whose fail-closed
+  behavior on "no matching band" is wrong for a threshold lookup that's
+  usually not required) to decide whether the batch needs a manager to
+  review it after the fact; `POST /production-batches/:batchId/approve`
+  and `.../reject` never affect what already posted, only
+  `cost_review_status`. Accounting's schema needed a real shape decision
+  too — since `reports.service.ts` sums `journal_lines` directly to
+  produce the trial balance, a journal entry cannot exist `POSTED` while
+  still pending approval the way a PO can be `OPEN` while
+  `approval_status=PENDING`; `journal_entries.status` itself now carries
+  `PENDING_APPROVAL`/`REJECTED` as first-class states rather than adding a
+  redundant parallel column. Manufacturing needed its own new Keycloak
+  M2M client (`manufacturing-service`, added to governance-service's
+  `M2M_ALLOWED_CLIENT_IDS`) since it never called governance-service
+  before this. See `docs/RUNBOOK.md`'s "Approval-matrix enforcement"
+  section for the full verification trail, including two real bugs found
+  only by hitting a live database (a missing `UPDATE` grant on
+  `journal_entries`, and a BigInt/JSON.stringify serialization crash on
+  manufacturing-service's first `sync_seq`-returning GET endpoint).
 - **Automated test coverage now spans every part of the platform — all 8
   Node services, the Go `ledger-service`'s pure logic, procurement-service
   against a real Postgres, and the Flutter mobile app — but is uneven by

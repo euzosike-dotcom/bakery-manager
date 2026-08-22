@@ -134,16 +134,18 @@ model FuelRecord {
 }
 
 model MaintenanceRequest {
-  tenantId             String    @map("tenant_id") @db.Uuid
-  maintenanceRequestId String    @map("maintenance_request_id") @db.Uuid
-  vehicleId            String    @map("vehicle_id") @db.Uuid
-  reason               String
-  requestStatus        String    @map("request_status")
-  notes                String?
-  partsCost            Decimal?  @map("parts_cost") @db.Decimal(14, 2)
-  labourCost           Decimal?  @map("labour_cost") @db.Decimal(14, 2)
-  completedAt          DateTime? @map("completed_at")
-  createdAt            DateTime  @map("created_at")
+  tenantId              String    @map("tenant_id") @db.Uuid
+  maintenanceRequestId  String    @map("maintenance_request_id") @db.Uuid
+  vehicleId             String    @map("vehicle_id") @db.Uuid
+  reason                String
+  requestStatus         String    @map("request_status")
+  notes                 String?
+  partsCost             Decimal?  @map("parts_cost") @db.Decimal(14, 2)
+  labourCost            Decimal?  @map("labour_cost") @db.Decimal(14, 2)
+  completedAt           DateTime? @map("completed_at")
+  createdAt             DateTime  @map("created_at")
+  currentApprovalStage  Int       @default(1) @map("current_approval_stage")
+  pendingApproverRoleId String?   @map("pending_approver_role_id") @db.Uuid
 
   vehicle Vehicle @relation(fields: [tenantId, vehicleId], references: [tenantId, vehicleId])
 
