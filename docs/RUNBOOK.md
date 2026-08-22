@@ -5427,3 +5427,145 @@ all 12 tests pass, no regressions.
   that registry exists and is tenant-configurable, but nothing in this
   platform validates `reasonCode` against it server-side either, so a
   picklist UI would be decorative until that validation exists.
+
+## Expense Management — a new module, not an extension of an existing one
+
+Explicit user request: add Expense Management with four capabilities —
+expense requests, amount-based approval routing, booking to the chart of
+accounts, and configurable expense categories. Read that list back
+against what already existed and it's exactly the shape manual journal
+entries (migration 022) already have: propose an amount, get it tier-
+approved via `checkApprovalAuthority`, post it to the ledger. Built as a
+new `expenses/` module inside accounting-service rather than a new
+microservice — no new port, Postgres role, Keycloak M2M client, or nginx
+route, reusing everything bills/invoices/journals/period-close already
+share in that service. A new standalone `expense-service` was the
+explicit alternative considered and rejected: matches this platform's
+one-service-per-PRD-module convention, but would be a lot of new
+infrastructure for a workflow accounting-service already knows how to do.
+
+### 1. Two new tables, one new approval_matrix band (migration 031)
+
+`expense_categories` (tenant_id, category_id, category_name,
+gl_account_code, is_active) — tenant-configurable, same "domain-owned
+config" shape as `payroll_tax_bands` (migration 027), not governance-
+service's `reason_codes`: this is accounting-specific configuration tied
+directly to the tenant's own `chart_of_accounts` via a real foreign key,
+not a generic cross-module registry. `createCategory` validates the
+target account both exists AND is `account_type = 'EXPENSE'` before
+allowing a category to point at it — a category booking against an
+ASSET or LIABILITY account by mistake would silently corrupt every
+report that reads `chart_of_accounts` by type, so this is checked at
+configuration time, not left to whatever eventually posts the first
+request against it.
+
+`expense_requests` — the same `PENDING_APPROVAL`/`POSTED`/`REJECTED` +
+`current_approval_stage`/`pending_approver_role_id` shape as
+`journal_entries`, and the same rule every approval_matrix module in
+this platform follows: creation calls no authority check at all, only
+approve/reject do, and reject requires the identical tier-check as
+approve. `journal_entry_id` is populated only once approved — the real,
+auditable link to whatever got booked.
+
+New `approval_matrix` row: `module_name = 'ACCOUNTING'`, `transaction_
+type = 'EXPENSE_REQUEST'` — a new transaction type under the existing
+Accounting module, not a new module_name, and its own threshold band
+(0–20,000 → `PROCUREMENT_MGR`, 20,000+ → `FINANCE_CONTROLLER`), free to
+diverge from `MANUAL_JOURNAL_ENTRY`'s independently. Tunable seed data,
+not a hardcoded business rule — same two capability-having roles as
+every other module in this dev seed, for the same reason
+`governance_seed.sql`'s own comment already gives (no purpose-named
+approver roles exist in this 3-user dataset).
+
+### 2. Approval posts directly to the ledger — Dr category / Cr Accounts Payable
+
+`ExpensesService.approveExpenseRequest` mirrors `JournalsService.
+approveJournalEntry` almost exactly through the tier-check, then departs
+from it at the final stage: instead of just flipping a status, it writes
+a real, balanced `journal_entries`/`journal_lines` pair inside the same
+transaction — Dr the category's own `gl_account_code`, Cr `2110 Accounts
+Payable` (already seeded since Procurement's first slice, no new
+liability account needed). The expense becomes a payable owed to
+whoever incurred it; actual cash payment is a separate later step, same
+shape as Fleet's maintenance-completion posting and Procurement's GRN
+posting — considered and explicitly NOT crediting `1100 Cash and Bank`
+directly (Fleet's fuel-recorded shape, instant reimbursement), since that
+assumes every tenant pays expense claims the instant they're approved,
+which the AP shape doesn't have to assume. Rejecting never touches the
+ledger at all — `journalEntryId` stays `null`.
+
+### 3. Verification — real Keycloak users, real tier boundaries, a real live database
+
+Against the live dev app and database, curl first then the mobile
+Approvals tab (extended with a fifth "Expense Requests" section, reusing
+100% of the tab's existing load/act/refresh machinery — `ApiClient.
+accountingApi` already existed from the approval_matrix UI pass, so this
+needed only three new methods on it):
+
+1. **Category configuration validated for real**: creating a category
+   against a non-EXPENSE account (`1100`, an ASSET) and a nonexistent
+   account code both correctly `400`; creating one against a real new
+   EXPENSE account (`5360 Travel Expense`, added live via `psql`, then a
+   second category — `Office Supplies` against the migration's own
+   seeded `5350` — proving more than one category works) both `201`.
+2. **Correct-tier approve succeeds, wrong-tier is denied**: Chidinma
+   (`PROCUREMENT_MGR`) approves an 8,000 Travel request (within her
+   0–20,000 band) → `201 POSTED`; she's denied on a 35,000 request with
+   the exact expected `403` message; Tunde (`FINANCE_CONTROLLER`)
+   approves that same 35,000 request → `201 POSTED`.
+3. **The GL posting is real, not asserted**: a direct `psql` join of
+   `journal_entries`/`journal_lines` for both approved requests' own
+   `journalEntryId`s shows exactly the expected Dr `5360` / Cr `2110`
+   pair, correctly balanced, for both the 8,000 and 35,000 amounts.
+4. **Reject requires the same tier-check as approve, and never posts**:
+   a third request (28,000) is correctly denied when Chidinma tries to
+   reject it (above her tier — rejecting isn't a lower bar than
+   approving), then Tunde rejects it successfully → `201 REJECTED`,
+   `journalEntryId: null`.
+5. **Deactivating a category is real and enforced**: deactivating Office
+   Supplies, then attempting to file a new request against it, correctly
+   `400`s ("is not active") — confirmed the request is never created.
+6. **RLS blocks cross-tenant reads on both new tables** — the same
+   `SET app.tenant_id = '<foreign-tenant>'` smoke test this repo has run
+   for every new table since its first vertical slice, `count = 0` for
+   both.
+7. **The mobile Approvals tab, end to end**: a fresh 12,000 Travel
+   request appears correctly under a new "Expense Requests" section;
+   Tunde's approve attempt correctly surfaces the real `403` via
+   `SnackBar` (the same exact-tier-match semantics already proven for
+   Procurement POs — a higher capability tier does NOT automatically
+   cover a lower band); logging out and back in as Chidinma, her
+   approve attempt succeeds, the SnackBar reads "Expense request
+   approved.", and the now-empty section correctly disappears from the
+   list.
+8. Jest: 11 new tests (`expenses.service.spec.ts`) covering category
+   validation (missing account, wrong account type), request creation
+   against an inactive category, the exact Dr/Cr lines a final-stage
+   approval produces, stage-advancement with no GL effect when a further
+   approval stage is required, and reject's identical tier-check. All 21
+   of accounting-service's tests pass; `flutter analyze`/`flutter test`
+   both clean on the mobile side (12/12).
+
+### Known gaps after this pass
+
+- No mobile capture screen for SUBMITTING an expense request — creation
+  is curl-proven only, same scope decision already made for
+  `maintenance_requests` (README's "Known gaps"): the Approvals tab
+  reviews and decides, it doesn't originate requests. A future pass
+  adding a submission screen would reuse the exact same `ApiClient.
+  createExpenseRequest` this pass already built.
+- `expense_categories` has create/list/deactivate but no reactivate and
+  no update-in-place (e.g. repointing a category at a different GL
+  account) — same minimal CRUD scope `reason-codes` shipped with
+  (create + list only); deactivate was added because a real
+  configuration lifecycle needs it, reactivate/update weren't needed to
+  prove the pattern.
+- No payment-tracking step once an expense request posts to Accounts
+  Payable — unlike vendor bills, there's no `expense_payments` table or
+  `POST .../pay` endpoint; the payable just sits on `2110` alongside
+  every other AP balance until whatever process already reconciles that
+  account handles it. Out of scope: the user's four requirements stop at
+  "booking to chart of accounts," not payment processing.
+- Only one approval_matrix band split was seeded (0–20,000 /
+  20,000+) — reasonable default, not a business requirement the user
+  specified; trivially re-seeded via SQL if a real threshold is known.

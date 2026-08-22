@@ -1254,6 +1254,7 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
   List<Map<String, dynamic>> _journalEntries = [];
   List<Map<String, dynamic>> _maintenanceRequests = [];
   List<Map<String, dynamic>> _productionBatches = [];
+  List<Map<String, dynamic>> _expenseRequests = [];
   bool _loading = true;
   String? _loadError;
 
@@ -1271,12 +1272,14 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
         widget.accountingApi.fetchJournalEntries(),
         widget.fleetApi.fetchMaintenanceRequests(),
         widget.manufacturingApi.fetchProductionBatches(),
+        widget.accountingApi.fetchExpenseRequests(),
       ]);
       setState(() {
         _purchaseOrders = results[0].where((r) => r['approvalStatus'] == 'PENDING').toList();
         _journalEntries = results[1].where((r) => r['status'] == 'PENDING_APPROVAL').toList();
         _maintenanceRequests = results[2].where((r) => r['requestStatus'] == 'PENDING_APPROVAL').toList();
         _productionBatches = results[3].where((r) => r['cost_review_status'] == 'PENDING_APPROVAL').toList();
+        _expenseRequests = results[4].where((r) => r['status'] == 'PENDING_APPROVAL').toList();
         _loadError = null;
         _loading = false;
       });
@@ -1419,6 +1422,25 @@ class _ApprovalsTabState extends State<_ApprovalsTab> {
           ),
         ),
       ));
+    }
+
+    if (_expenseRequests.isNotEmpty) {
+      sections.add(_sectionHeader('Expense Requests (${_expenseRequests.length})'));
+      sections.addAll(_expenseRequests.map((er) {
+        final category = er['category'] as Map<String, dynamic>?;
+        return _approvalTile(
+          title: category?['categoryName'] as String? ?? 'Expense',
+          subtitle: '${er['description'] ?? 'No description'} — Amount: ${er['amount']}',
+          onApprove: () => _act(
+            () => widget.accountingApi.approveExpenseRequest(er['expenseRequestId'] as String),
+            'Expense request approved.',
+          ),
+          onReject: () => _act(
+            () => widget.accountingApi.rejectExpenseRequest(er['expenseRequestId'] as String),
+            'Expense request rejected.',
+          ),
+        );
+      }));
     }
 
     return RefreshIndicator(

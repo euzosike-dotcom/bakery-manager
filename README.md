@@ -509,6 +509,41 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   differently-shaped endpoints, a real `reasonCode` bug the live
   verification caught and fixed, and the full tier-boundary verification
   trail across two real Keycloak users.
+- **Expense Management is a new module — expense requests, approval_
+  matrix routing, booking to the chart of accounts, and configurable
+  expense categories.** Lives inside accounting-service (a new
+  `expenses/` module) rather than a new microservice — the exact same
+  "propose an amount, get it tier-approved, post it to the ledger" shape
+  manual journal entries already have, reusing accounting-service's
+  existing Postgres role, chart_of_accounts, and posting logic rather
+  than standing up a new port/Keycloak client/nginx route for a workflow
+  it already knows how to do. Two new tables (migration 031):
+  `expense_categories` (tenant-configurable, each mapped to a real
+  `chart_of_accounts` EXPENSE account — validated at configuration time,
+  not left to whatever eventually posts against it) and `expense_
+  requests` (the same `PENDING_APPROVAL`/`POSTED`/`REJECTED` shape as
+  journal entries). A new `approval_matrix` row (module `ACCOUNTING`,
+  transaction type `EXPENSE_REQUEST`, its own threshold band) routes
+  approval; a final-stage approval writes a real, balanced journal entry
+  — Dr the category's own EXPENSE account, Cr `2110 Accounts Payable`
+  (already seeded since Procurement's first slice) — mirroring Fleet's
+  maintenance-completion posting, not Fleet's fuel-recorded one: the
+  expense becomes a payable owed to whoever incurred it, not an
+  instant cash reimbursement. Verified for real: category creation
+  rejects a non-EXPENSE or nonexistent account with a real `400`;
+  Chidinma (`PROCUREMENT_MGR`) approves an 8,000 request within her
+  0–20,000 band and is correctly denied on a 35,000 one; Tunde
+  (`FINANCE_CONTROLLER`) approves that 35,000 request; a direct `psql`
+  join confirms both postings are real, correctly-balanced journal
+  entries, not just asserted; reject requires the identical tier-check
+  as approve; a deactivated category correctly blocks new requests
+  against it; RLS blocks cross-tenant reads on both new tables. The
+  mobile Approvals tab gained a fifth section for it — reusing the exact
+  same load/act/refresh machinery the approval_matrix UI pass already
+  built, needing only three new `ApiClient` methods. See
+  `docs/RUNBOOK.md`'s "Expense Management" section for the full
+  design-decision and verification trail, including why a new
+  microservice was considered and rejected.
 - **Automated test coverage now spans every part of the platform — all 8
   Node services, the Go `ledger-service`'s pure logic, procurement-service
   against a real Postgres, and the Flutter mobile app — but is uneven by

@@ -177,6 +177,19 @@ class ApiClient {
   Future<Map<String, dynamic>> approveProductionBatch(String batchId) => _post('production-batches/$batchId/approve');
   Future<Map<String, dynamic>> rejectProductionBatch(String batchId) => _post('production-batches/$batchId/reject');
 
+  /// Expense Requests pending approval, for the Approvals tab — called
+  /// against accounting-service, same as Journal Entries above.
+  Future<List<Map<String, dynamic>>> fetchExpenseRequests() async {
+    final res = await _client.get(Uri.parse('$baseUrl/expense-requests'), headers: await _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> approveExpenseRequest(String expenseRequestId) =>
+      _post('expense-requests/$expenseRequestId/approve');
+  Future<Map<String, dynamic>> rejectExpenseRequest(String expenseRequestId) =>
+      _post('expense-requests/$expenseRequestId/reject');
+
   Future<Map<String, dynamic>> _post(String path, {Map<String, dynamic>? body}) async {
     final res = await _client.post(
       Uri.parse('$baseUrl/$path'),

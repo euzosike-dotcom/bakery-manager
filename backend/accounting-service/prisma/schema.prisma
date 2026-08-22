@@ -76,6 +76,41 @@ model JournalLine {
   @@map("journal_lines")
 }
 
+// --- Expense Management (migration 031) — this module's own tables ---
+
+model ExpenseCategory {
+  tenantId      String  @map("tenant_id") @db.Uuid
+  categoryId    String  @map("category_id") @db.Uuid
+  categoryName  String  @map("category_name")
+  glAccountCode String  @map("gl_account_code")
+  isActive      Boolean @default(true) @map("is_active")
+
+  requests ExpenseRequest[]
+
+  @@id([tenantId, categoryId])
+  @@unique([tenantId, categoryName])
+  @@map("expense_categories")
+}
+
+model ExpenseRequest {
+  tenantId               String   @map("tenant_id") @db.Uuid
+  expenseRequestId        String   @map("expense_request_id") @db.Uuid
+  categoryId              String   @map("category_id") @db.Uuid
+  amount                  Decimal  @db.Decimal(14, 2)
+  description              String?
+  submittedByUserId        String?  @map("submitted_by_user_id") @db.Uuid
+  status                   String
+  currentApprovalStage     Int      @default(1) @map("current_approval_stage")
+  pendingApproverRoleId    String?  @map("pending_approver_role_id") @db.Uuid
+  journalEntryId           String?  @map("journal_entry_id") @db.Uuid
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  category ExpenseCategory @relation(fields: [tenantId, categoryId], references: [tenantId, categoryId])
+
+  @@id([tenantId, expenseRequestId])
+  @@map("expense_requests")
+}
+
 // --- Read-only master/source data from other modules' migrations ---
 
 model Plant {
