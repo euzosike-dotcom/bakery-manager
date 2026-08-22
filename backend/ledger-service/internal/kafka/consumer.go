@@ -102,7 +102,7 @@ func sourceModuleFor(eventType string) string {
 	case "batch.consumption_recorded.v1", "batch.output_recorded.v1",
 		"batch.yield_variance_unfavorable.v1", "batch.yield_variance_favorable.v1":
 		return "manufacturing"
-	case "sales.order_fulfilled.v1", "ncr.verified.v1":
+	case "sales.order_fulfilled.v1", "sales.order_fulfilled_direct.v1", "ncr.verified.v1":
 		return "sales"
 	case "accounting.bill_paid.v1", "accounting.invoice_payment_received.v1":
 		return "accounting"

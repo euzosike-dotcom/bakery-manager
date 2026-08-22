@@ -93,6 +93,45 @@ describe('SalesService.createSalesOrder — capital gate', () => {
     expect(result.status).toBe('ACKED');
   });
 
+  it('a direct (customer-invoiced) order bypasses the capital gate entirely, even when it exceeds approved capital', async () => {
+    // approvedTradingCapital 50000 (from makeTx default), order value
+    // 60,000 — would BLOCK a normal order (see the test above), but a
+    // customerId makes this a direct order instead.
+    const tx = makeTx({ customer: { findUnique: jest.fn().mockResolvedValue({ customerId: 'cust-1' }) } });
+    const kafka = makeKafka();
+    const service = new SalesService(makePrisma(tx), kafka);
+
+    const result = await service.createSalesOrder(
+      TENANT,
+      baseDto({ customerId: 'cust-1', lines: [{ skuId: 'sku-1', orderedQty: 60, unitPrice: 1000 }] }),
+      { createdOffline: false },
+    );
+
+    expect(result.status).toBe('ACKED');
+    expect(result.reasonCode).toBeUndefined();
+    expect(kafka.publish).toHaveBeenCalledWith(
+      TENANT,
+      'sales.order_fulfilled_direct.v1',
+      expect.objectContaining({ order_value: 60000 }),
+    );
+  });
+
+  it("a direct order never writes to trading_capital_ledger, and reports the agent's available capital unchanged", async () => {
+    const tx = makeTx({ customer: { findUnique: jest.fn().mockResolvedValue({ customerId: 'cust-1' }) } });
+    const service = new SalesService(makePrisma(tx), makeKafka());
+
+    const result = await service.createSalesOrder(TENANT, baseDto({ customerId: 'cust-1' }), { createdOffline: false });
+
+    // approvedTradingCapital 50000, no prior exposure -> unaffected by
+    // this 10,000 direct order.
+    expect(result.availableCapital).toBe(50000);
+    // $executeRaw IS called for the sales_orders + order_lines inserts
+    // (unrelated to capital) — the assertion is specifically that NONE
+    // of those raw-SQL calls touch trading_capital_ledger.
+    const rawSqlCalls = (tx.$executeRaw as jest.Mock).mock.calls.map((call) => (call[0] as TemplateStringsArray).join(''));
+    expect(rawSqlCalls.some((sql) => sql.includes('trading_capital_ledger'))).toBe(false);
+  });
+
   it('is idempotent: replaying an already-applied clientEventId returns the original result without recomputing capital', async () => {
     const tx = makeTx({
       salesOrder: {

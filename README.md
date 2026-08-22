@@ -266,14 +266,40 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   including two real bugs it surfaced and fixed (a numeric-as-string
   cast bug in two of the Procurement/Manufacturing pull handlers, and a
   BigInt-JSON-serialization bug in crm-service's Activities list endpoint).
-- **NCR-based and invoice-payment-based AR recovery are unreconciled**: a
-  Sales NCR verification and an Accounting Customer Invoice payment both
-  credit the same GL account (1210, Agent Wallet / Trading Capital
-  Receivable) with no cross-check between the two channels — flagged when
-  the Accounting schema was designed (`014_accounting.sql`'s header
-  comment). No rule exists anywhere in the original PRD for whether a
-  customer-invoiced order should even participate in agent capital at all,
-  since that PRD predates the CRM/customer concept entirely.
+- **NCR-based and invoice-payment-based AR recovery are now reconciled** —
+  the overlap `014_accounting.sql`'s header comment originally flagged
+  (both crediting the same GL account, 1210, with no cross-check) turned
+  out to be two real bugs, not one: a double-credit risk, and — more
+  damaging — a customer-invoiced order's exposure could NEVER leave
+  `trading_capital_ledger` unless the agent separately filed an NCR
+  covering it, since invoice payment never touched that sub-ledger at
+  all; a fully-paid customer invoice could permanently lock an agent out
+  of new orders. Resolved with an explicit product decision (not
+  specified anywhere in the original PRD, which predates the CRM/
+  customer concept entirely): a customer-invoiced order is a
+  fundamentally different transaction from an agent taking goods on
+  trading capital — the credit risk belongs to the company's direct
+  relationship with a known, CRM-tracked customer, not the agent — so it
+  now bypasses agent capital ENTIRELY (no capital check, no
+  `trading_capital_ledger` write, always confirmed) and posts to a new
+  dedicated receivable (`1220`, Accounts Receivable — Customers) via a
+  second event type (`sales.order_fulfilled_direct.v1`), the same "two
+  event types instead of `condition_expression`" pattern Manufacturing's
+  favorable/unfavorable variance events already established. NCR
+  (agent-level, still credits `1210`) and invoice payment (order-level,
+  now credits `1220`) never resolve the same account again — not a
+  cross-check bolted onto the old design, but structurally impossible to
+  collide by construction. Verified for real: a 900,000 direct order
+  that would have been blocked for a normal agent order (available
+  capital ~412,200) confirmed instantly with zero `trading_capital_ledger`
+  writes and the agent's capital unchanged; a same-size normal order
+  still gated exactly as before; NCR verification still restored capital
+  and posted to 1210, completely independently. See `docs/RUNBOOK.md`'s
+  "NCR / invoice-payment reconciliation" section for the full trail,
+  including a real gap the change itself surfaced (a new event type
+  missing from ledger-service's explicit event-to-module lookup, caught
+  and fixed) and a note on why one existing dev-data invoice ended up
+  crediting the new account instead of the old one.
 - **Period-close is now real** — `POST /period-close` (accounting-service)
   zeroes every REVENUE and EXPENSE account's current balance into a new
   `3100 Retained Earnings` EQUITY account (the chart of accounts never

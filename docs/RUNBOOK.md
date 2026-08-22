@@ -4869,3 +4869,171 @@ has non-negative debit and credit amounts.
   currency closing (translation adjustments, multiple retained-earnings
   accounts per legal entity) isn't attempted; this platform has neither
   concept yet anywhere.
+
+## NCR / invoice-payment reconciliation
+
+`014_accounting.sql`'s own header comment flagged this the moment
+Customer Invoices shipped: recording a payment against a customer
+invoice credits the same GL account (`1210`, Agent Wallet / Trading
+Capital Receivable) that NCR verification (Sales module) also credits,
+with no cross-check between the two channels. Tracing through both
+flows end to end surfaced that this is actually TWO real bugs, not one.
+
+### 1. What was actually broken
+
+- **GL double-credit risk**: `ncr.verified.v1` (agent-level, a bulk cash
+  remittance not tied to any specific order) and
+  `accounting.invoice_payment_received.v1` (order-level, tied to one
+  invoice) both credit `1210` independently. The same real cash could
+  get recorded twice if an agent's bulk NCR happens to cover an amount a
+  customer already paid directly against their own invoice.
+- **The more damaging half**: `sales.order_fulfilled.v1` debits
+  `trading_capital_ledger` (consuming agent capital) for EVERY
+  confirmed order, customer-invoiced or not — but ONLY
+  `ncr.verified.v1` ever credits it back. `InvoicesService.recordPayment`
+  never touched `trading_capital_ledger` at all, only the GL. A
+  customer-invoiced order's exposure could therefore never leave the
+  agent's operational capital ledger unless the agent separately filed
+  an unrelated NCR that happened to cover it — meaning a fully-paid
+  customer invoice could permanently lock that agent out of placing new
+  orders, a real broken capital-gating outcome, not just an accounting
+  presentation issue.
+
+### 2. The decision: decouple, don't cross-check
+
+Two structurally different resolutions were possible: keep customer-
+invoiced orders inside agent capital and teach invoice payment to also
+restore `trading_capital_ledger` (mirroring NCR, via a new cross-service
+event sales-service would need to consume), or take customer-invoiced
+orders OUT of agent capital entirely, since the credit risk for a known,
+CRM-tracked customer belongs to the company's direct relationship with
+that customer (`customer_invoices`, its own due date), not to the
+agent's trading capital.
+
+The second was chosen, explicitly, as a product decision — not
+specified anywhere in the original PRD, which predates the CRM/customer
+concept entirely (same "no rule exists" gap the header comment already
+named). It's also the one that resolves BOTH bugs by construction: if a
+customer-invoiced order never touches `1210` or `trading_capital_ledger`
+in the first place, there is nothing for NCR (agent-level) and invoice
+payment (order-level) to ever double-credit, and nothing for a
+customer's payment to fail to restore.
+
+### 3. Implementation
+
+- **New GL account** (`029_ncr_invoice_reconciliation.sql`): `1220
+  Accounts Receivable — Customers`, ASSET.
+- **A second event type**, not `posting_rules.condition_expression`
+  (never implemented anywhere in this platform, per the existing "known
+  gap" note on that column) — `sales.order_fulfilled_direct.v1`, routed
+  by its own posting rule (Dr `1220` / Cr `4000`) to the new receivable.
+  This is the exact same "two event types instead of a conditional
+  posting rule" pattern Manufacturing already established
+  (`batch.yield_variance_favorable.v1` / `_unfavorable.v1`).
+- **`accounting.invoice_payment_received.v1`'s own posting rule** now
+  credits `1220` instead of `1210` — the OLD row was deactivated
+  (`is_active = false`), not deleted or updated in place: `posting_rules`
+  has no unique constraint on `(tenant_id, event_type)` precisely so a
+  rule can be superseded this way, and `is_active` exists for exactly
+  this (`loadPostingRule` already filters on it). Forward-looking only,
+  same "don't rewrite history" treatment migration 022 gave
+  `journal_entries.status` — journal lines already posted under the old
+  mapping are untouched.
+- **`SalesService.createSalesOrder`**: a new `isDirect = Boolean(dto
+  .customerId)` short-circuits the capital gate entirely for such
+  orders — `withinCapital` is always `true`, `trading_capital_ledger` is
+  never written, and the reported `availableCapital` is simply whatever
+  it already was (the order never touched it). Publishes
+  `sales.order_fulfilled_direct.v1` instead of `sales.order_fulfilled.v1`
+  when direct.
+- **`accounting-service`'s Kafka consumer** now also routes
+  `sales.order_fulfilled_direct.v1` to the same
+  `InvoicesService.handleSalesOrderFulfilled` handler that already
+  existed — it already branches on the order's own `customerId`
+  internally, and every `_direct` order has one by construction, so no
+  new invoice-creation logic was needed, only the additional
+  subscription.
+
+### 4. A real gap the change itself surfaced
+
+Verifying against the live database, the new event type's journal
+entries showed `source_module = unknown` instead of `sales`.
+`ledger-service`'s `sourceModuleFor` (`internal/kafka/consumer.go`) is a
+small, deliberately explicit switch statement over known event types —
+its own comment says why: "adding a new event type to a new module is a
+one-line change reviewers can actually see in a diff," rather than a
+convention-based guess. Adding `sales.order_fulfilled_direct.v1` to a
+new event type is exactly the one-line change that comment anticipates,
+and it was missed on the first pass. Fixed by adding the new event type
+to the existing `sales.order_fulfilled.v1, ncr.verified.v1` case;
+verified for real afterward — a second direct order's journal entry
+correctly showed `source_module = sales`.
+
+### 5. Verification — real capital bypass, real independence, one honest data-artifact note
+
+1. Unit tests: `sales.service.spec.ts` gained two tests — a direct order
+   confirms even when it would exceed approved capital (a 900,000
+   order against ~412,200 available capital), and a direct order writes
+   no `trading_capital_ledger` row at all (asserted by inspecting the
+   raw SQL text of every `$executeRaw` call, not just call count, since
+   `$executeRaw` is also legitimately called for the order/line inserts
+   themselves). All 5 pre-existing tests pass unchanged — normal orders
+   are completely unaffected by this change.
+2. Before applying the migration, closed out both pre-existing customer
+   invoices in the dev database under the STILL-ACTIVE old rule
+   (crediting `1210`), specifically to avoid leaving a straddling
+   invoice whose original debit and final payment credit ended up on
+   different accounts.
+3. Applied `029_ncr_invoice_reconciliation.sql` live; confirmed the new
+   `1220` account, the new posting rule, and the deactivated/superseded
+   pair for `accounting.invoice_payment_received.v1` all exist exactly
+   as designed.
+4. Real API calls, real Keycloak tokens: a 900,000 direct order (customer
+   attached) against an agent with only ~412,200 available capital
+   confirmed instantly (`ACKED`, not `NEEDS_REVIEW`) with `availableCapital`
+   in the response UNCHANGED — confirmed against the database that zero
+   `trading_capital_ledger` rows exist for that order at all. A
+   same-shape normal order (no customer) correctly reduced available
+   capital exactly as it always has. NCR submit-then-verify still
+   restored capital and posted `Dr 1100 / Cr 1210` — entirely unaffected
+   by any of this.
+5. Once `ledger-service` (which hadn't been running continuously through
+   this session's many verification passes) caught up on its Kafka
+   backlog, the actual posted journal lines confirmed everything by
+   inspection: the direct order posted `Dr 1220 / Cr 4000`; the normal
+   order posted `Dr 1210 / Cr 4000`, unchanged; a real customer invoice
+   auto-generated correctly for the direct order via the shared handler.
+6. One honest artifact, not hidden: because `ledger-service` wasn't
+   running continuously, the pre-existing invoice's final payment
+   (step 2, made under the OLD rule while it was still active) wasn't
+   actually consumed and posted until AFTER the migration had already
+   flipped the active rule — so that one historical payment landed on
+   `1220` instead of the `1210` its own order's original debit used.
+   `journal_lines` is genuinely append-only (`journal_lines_no_update`/
+   `_no_delete` rules, migration 005) so this can't be corrected with an
+   `UPDATE`, only a real reversing entry, which wasn't worth the
+   complexity for one dev-data sequencing artifact — left as-is and
+   documented here rather than silently cleaned up. It doesn't reflect
+   anything wrong with the reconciliation logic itself, only that manual
+   verification in this session doesn't run every service continuously.
+
+### Known gaps after this pass
+
+- The double-credit risk between NCR and invoice payment is resolved by
+  construction for orders going forward, but pre-existing orders from
+  before this pass shipped (if any real deployment has them) would still
+  have posted under the old, unreconciled scheme — this migration is
+  forward-looking only, same as every other posting-rule change in this
+  platform.
+- No UI surfaces the distinction between a "direct" and an "agent"
+  order to the person creating it beyond picking a customer or not —
+  the mobile Sales Order capture screen's capital-warning messaging
+  still displays available capital and a based-on-capital warning
+  regardless of whether a customer is selected, even though that
+  warning becomes inapplicable the moment a customer is attached. Not
+  fixed in this pass — a screen-level polish item, not a backend
+  correctness gap.
+- No dunning, aging, or credit-limit process for the new `1220`
+  receivable — `customer_invoices.due_date` exists and is set, but
+  nothing reads it to flag or block an overdue direct-sale customer the
+  way agent capital blocks an over-exposed agent.

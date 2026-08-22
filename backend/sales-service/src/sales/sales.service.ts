@@ -19,6 +19,18 @@ export interface CreateSalesOrderOptions {
  * read and the `trading_capital_ledger` insert in one transaction is what
  * closes the race where two rapid orders from the same agent could each
  * see stale "before" exposure and both pass.
+ *
+ * A customer-invoiced ("direct") order — one with `dto.customerId` set —
+ * bypasses this gate ENTIRELY (docs/RUNBOOK.md's "NCR / invoice-payment
+ * reconciliation" section): its credit risk belongs to the company's
+ * direct relationship with a known, CRM-tracked customer
+ * (accounting-service's `customer_invoices`, its own due date), not to
+ * the agent's trading capital. It never writes `trading_capital_ledger`
+ * and publishes a different event type (`sales.order_fulfilled_direct.v1`,
+ * routed by `029_ncr_invoice_reconciliation.sql`'s posting rule to a
+ * dedicated receivable, `1220`) so NCR (agent-level, credits `1210`) and
+ * invoice payment (order-level, now credits `1220`) never resolve the
+ * same GL account again.
  */
 @Injectable()
 export class SalesService {
@@ -50,6 +62,7 @@ export class SalesService {
     }
 
     const totalOrderValue = dto.lines.reduce((sum, l) => sum + l.orderedQty * l.unitPrice, 0);
+    const isDirect = Boolean(dto.customerId);
 
     const result = await this.prisma.forTenant(tenantId, async (tx) => {
       const agent = await tx.agentMaster.findUnique({ where: { tenantId_agentId: { tenantId, agentId: dto.agentId } } });
@@ -69,7 +82,10 @@ export class SalesService {
       });
       const outstandingExposure = Number(aggregate._sum.debitValue ?? 0) - Number(aggregate._sum.creditValue ?? 0);
       const availableCapital = Number(agent.approvedTradingCapital) - outstandingExposure;
-      const withinCapital = totalOrderValue <= availableCapital;
+      // A direct (customer-invoiced) order never consumes agent capital —
+      // see class doc comment — so it's always within "capital" by
+      // definition, regardless of the agent's actual exposure.
+      const withinCapital = isDirect ? true : totalOrderValue <= availableCapital;
 
       const salesOrderId = dto.salesOrderId ?? randomUUID();
       const orderStatus = withinCapital ? 'CONFIRMED' : 'NEEDS_REVIEW';
@@ -95,21 +111,29 @@ export class SalesService {
         `;
       }
 
-      if (withinCapital) {
+      if (withinCapital && !isDirect) {
         // Synchronous, same-transaction write to the operational sub-ledger
         // that gates future orders — this is NOT the GL journal entry
         // (that's posted asynchronously by ledger-service, see below).
+        // Skipped for direct orders — see class doc comment.
         await tx.$executeRaw`
           INSERT INTO trading_capital_ledger (tenant_id, tcl_entry_id, agent_id, entry_type, reference_no, debit_value, credit_value)
           VALUES (${tenantId}::uuid, ${randomUUID()}::uuid, ${dto.agentId}::uuid, 'DEBIT_EXPOSURE', ${dto.orderNumber}, ${totalOrderValue}, 0)
         `;
       }
 
-      return { salesOrderId, orderStatus, creditEligibilityStatus, availableCapital: availableCapital - (withinCapital ? totalOrderValue : 0) };
+      return {
+        salesOrderId,
+        orderStatus,
+        creditEligibilityStatus,
+        // A direct order never touched exposure, so the agent's available
+        // capital is simply whatever it already was.
+        availableCapital: isDirect ? availableCapital : availableCapital - (withinCapital ? totalOrderValue : 0),
+      };
     });
 
     if (result.creditEligibilityStatus === 'APPROVED') {
-      await this.kafka.publish(tenantId, 'sales.order_fulfilled.v1', {
+      await this.kafka.publish(tenantId, isDirect ? 'sales.order_fulfilled_direct.v1' : 'sales.order_fulfilled.v1', {
         event_id: randomUUID(),
         tenant_id: tenantId,
         sales_order_id: result.salesOrderId,

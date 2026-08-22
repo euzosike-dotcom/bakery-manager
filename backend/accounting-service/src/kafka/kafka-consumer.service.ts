@@ -67,6 +67,12 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
         });
         break;
       case 'sales.order_fulfilled.v1':
+      case 'sales.order_fulfilled_direct.v1':
+        // Both event types reach the same handler — it already branches
+        // on the order's own customerId (see its doc comment), and every
+        // _direct order has one by construction (docs/RUNBOOK.md's "NCR /
+        // invoice-payment reconciliation" section), so no behavior change
+        // is needed here beyond also listening for the new type.
         await this.invoices.handleSalesOrderFulfilled({
           eventId: event.event_id as string,
           tenantId: event.tenant_id as string,

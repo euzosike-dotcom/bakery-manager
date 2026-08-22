@@ -15,16 +15,22 @@ export interface SalesOrderFulfilledEvent {
 const INVOICE_NET_DAYS = 30;
 
 /**
- * Auto-generates a Customer Invoice from the same sales.order_fulfilled.v1
- * event ledger-service already consumes — but ONLY when the order carries a
- * CRM customer_id (migration 012). An order with no customer_id has no AR
- * paperwork to raise here; its existing Agent Wallet posting is unchanged
- * and unaffected by this module either way.
+ * Auto-generates a Customer Invoice from a sales order fulfillment event —
+ * `sales.order_fulfilled.v1` (agent-capital orders) or
+ * `sales.order_fulfilled_direct.v1` (customer-invoiced orders) — but ONLY
+ * actually raises an invoice when the order carries a CRM customer_id
+ * (migration 012); an order with no customer_id has no AR paperwork to
+ * raise here. In practice every `_direct` order has one by construction
+ * (sales.service.ts only publishes that event type when `dto.customerId`
+ * is set), so this branch is effectively always taken for that event type
+ * and effectively never taken for the original one.
  *
- * See migration 014's header comment for the deliberately-unreconciled
- * overlap between this invoice-payment recovery path and the Sales
- * module's NCR-based agent capital recovery path — both credit GL account
- * 1210. Not resolved here; flagged in README "Known gaps".
+ * `recordPayment` below now credits a dedicated receivable (`1220`, see
+ * `029_ncr_invoice_reconciliation.sql`), NOT the Agent Wallet (`1210`)
+ * NCR verification credits — the reconciliation migration 014's header
+ * comment originally flagged as unresolved. See docs/RUNBOOK.md's "NCR /
+ * invoice-payment reconciliation" section for the full resolution and its
+ * reasoning.
  */
 @Injectable()
 export class InvoicesService {
