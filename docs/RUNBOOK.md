@@ -5280,3 +5280,150 @@ Against the live dev database, not mocks:
   specific settings (which Zoho "organization," which QuickBooks
   "company," etc.) stored somewhere; no such storage exists yet, since
   there's nothing real to configure until a connector exists to use it.
+
+## Approvals tab — the mobile app's first approve/reject UI
+
+Explicit user request: scope out and build `approval_matrix` UI. The
+backend side (Procurement/Accounting/Fleet/Manufacturing list+approve+
+reject endpoints, `checkApprovalAuthority` threshold routing) was
+already complete from earlier passes — what was missing was ANY client
+for it. Grepping the mobile app for "approve"/"reject" turned up
+nothing but a read-only display of a user's `canApprove` flag on the
+Users tab; not even Procurement, the module `approval_matrix` was
+originally built for, had ever had approve/reject UI. One unified
+"Approvals" tab was built instead of bolting a review action onto each
+of the four existing tabs — a real approver wants one inbox to work
+through, and the four resources are different enough shapes (see
+below) that forcing them into a shared model would cost more than it
+saved.
+
+### 1. A field-shape survey before writing any UI
+
+The four modules' list endpoints don't agree on casing or field names,
+and this had to be gotten right before the UI could filter/display
+anything correctly:
+
+- Purchase Orders / Journal Entries / Maintenance Requests all go
+  through Prisma → camelCase (`approvalStatus`, `status`,
+  `requestStatus`).
+- Production Batches' list endpoint (`findAllBatches`) uses a raw
+  `$queryRaw('SELECT * FROM production_batches ...')` → the database's
+  own snake_case (`cost_review_status`, `batch_cost`, `batch_id`,
+  `batch_number`) — not a typo, a real difference caught by reading the
+  actual service code rather than assuming Prisma's casing was uniform
+  across the codebase.
+- Pending-state values and amount fields differ too: PO
+  `approvalStatus === 'PENDING'` / `totalPoValue` directly; Journal
+  Entry `status === 'PENDING_APPROVAL'` / no stored total, computed
+  client-side as `sum(lines[].debitAmount)` (a balanced entry's debit
+  sum equals its credit sum); Maintenance Request
+  `requestStatus === 'PENDING_APPROVAL'` / `partsCost + labourCost`;
+  Production Batch `cost_review_status === 'PENDING_APPROVAL'` /
+  `batch_cost` directly.
+
+### 2. No client-side role gating, by design
+
+The Approvals tab is visible to every signed-in user, same as every
+other tab in this app. The server's `checkApprovalAuthority` is the
+real gate, exactly as it already was for the API endpoints themselves —
+this client never hides an action based on the signed-in user's own
+role. A wrong-tier attempt surfaces as a real `ApiException` shown via
+`SnackBar`, not something the UI tries to prevent. `_ApprovalsTab`
+(`apps/mobile/lib/main.dart`) is a plain `StatefulWidget`, matching
+this app's established complexity convention — cubits are reserved for
+two-step offline-capture flows that need local Drift storage; this is a
+pure online-only decide-now action, like Customers/Vehicles/Employees.
+
+### 3. Accounting's first-ever mobile client
+
+`infra/nginx/locations.conf` had an explicit comment that
+accounting-service (3004) was deliberately not routed to the gateway,
+since it had no Flutter dependency. Approving/rejecting Journal Entries
+is the first one, so that comment was removed and a real `/accounting/`
+location block added, mirroring the other seven services' blocks
+exactly. `main.dart` gained an `_accountingApi` `ApiClient` instance
+the same way `_governanceApi` already existed (no `SyncModule` entry —
+this is a direct-REST client, not an offline-sync one).
+
+### 4. A real bug the live verification caught: `reasonCode`
+
+Testing reject live (never exercised before this pass) surfaced a real
+`400`: `{"message":["reasonCode must be a string"]}`. Investigation
+(reading all four reject controllers, not assuming they matched)
+found the four modules are NOT consistent here — Purchase Orders is
+the outlier: `RejectPurchaseOrderDto` requires `reasonCode` (a free-text
+string, `@IsString()` only, no enum restriction, used only for logging
+— `procurement.service.ts`); Journal Entries, Maintenance Requests, and
+Production Batches' reject endpoints take no `@Body()` at all. This is
+existing backend behavior, not something this pass introduced or
+changed — the fix is entirely client-side: `ApiClient.rejectPurchaseOrder`
+now takes a `reasonCode` argument and sends it as a JSON body (`_post`
+gained an optional `body` parameter, used only here); the other three
+`reject*` methods are unchanged. `main.dart`'s PO reject action now
+opens a small `AlertDialog` prompting for a reason before calling
+`_act` — the other three modules' reject buttons act immediately, same
+as approve, matching what their own endpoints actually require.
+
+### 5. Verification — real Keycloak users, real tier boundaries, all four modules
+
+Against the live dev app in the iOS Simulator, signed in as real
+Keycloak users, not test doubles:
+
+1. **All four sections render with real data**: Purchase Orders,
+   Journal Entries, Maintenance Requests, and Production Batch Cost
+   Reviews all populated correctly from their four differently-shaped
+   endpoints, each amount computed/displayed per the field-shape survey
+   above.
+2. **Wrong-tier approve denied**: Chidinma (`PROCUREMENT_MGR`) attempts
+   a 17,000 Fleet Maintenance Request (threshold 15,000, requires
+   `FINANCE_CONTROLLER`) → real `403`, exact server message shown via
+   `SnackBar`, item remains in the list.
+3. **Correct-tier approve succeeds**: Chidinma approves a 15,000
+   Journal Entry (within her 0–50,000 Accounting band) → success
+   `SnackBar`, the now-empty Journal Entries section disappears.
+4. **Correct-tier approve succeeds at a higher tier**: Tunde
+   (`FINANCE_CONTROLLER`, a newly-created test user for this pass —
+   proving tier-specific routing needs a real user in each tier, not
+   just one) approves the same 17,000 Maintenance Request Chidinma was
+   denied.
+5. **The `reasonCode` fix verified for real**: after the fix and an app
+   relaunch, rejecting a Purchase Order opens the reason dialog, and
+   the request that used to `400` now reaches the real authority check
+   — confirmed by the NEXT finding below, a real `403` (not another
+   `400`), proving reject now goes through `checkApprovalAuthority`
+   exactly like approve does.
+6. **Wrong-tier reject denied**: Tunde attempts to reject a 100,000
+   Purchase Order — Procurement's 0–500,000 band requires
+   `PROCUREMENT_MGR` specifically (not "that tier or above"), so
+   `FINANCE_CONTROLLER` is correctly denied with a real `403`.
+7. **Correct-tier reject succeeds**: Tunde rejects a 171,000 Production
+   Batch cost review (Manufacturing's single 150,000+ band) —
+   confirmed three ways: the app's success `SnackBar`, a direct
+   `psql` query showing `cost_review_status = REJECTED` on the real
+   row, and a direct `curl` against the live gateway with a freshly-
+   minted token showing the list endpoint correctly excludes it. A
+   second reject attempt on the same batch correctly `400`s
+   ("not pending cost review") rather than silently no-op'ing —
+   confirming the backend's state-transition guard, not something this
+   pass added.
+
+`flutter analyze`: no issues on either changed file. `flutter test`:
+all 12 tests pass, no regressions.
+
+### Known gaps after this pass
+
+- The `reasonCode` inconsistency across the four reject endpoints
+  (required + validated for POs, absent for the other three) is
+  existing backend behavior this pass worked around client-side, not
+  fixed at the source — a real audit trail arguably wants a reason on
+  every rejection, not just Purchase Orders'. Left alone since changing
+  three other services' DTOs is scope beyond what the UI gap needed.
+- No offline queueing for approve/reject — same online-only
+  simplification as every other master-data list in this app
+  (Customers/Vehicles/Employees/Users); a device needs connectivity to
+  act on an approval.
+- The reason text captured for PO rejection is freeform, not drawn from
+  governance-service's `reason-codes` registry (`GET /reason-codes`) —
+  that registry exists and is tenant-configurable, but nothing in this
+  platform validates `reasonCode` against it server-side either, so a
+  picklist UI would be decorative until that validation exists.

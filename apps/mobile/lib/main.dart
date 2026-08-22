@@ -101,6 +101,11 @@ class _MetrockAppState extends State<MetrockApp> {
   late final ApiClient _fleetApi;
   late final ApiClient _hrApi;
   late final ApiClient _governanceApi;
+  // Accounting has no SyncModule entry either (same reasoning as
+  // Governance below) — this app's first Accounting screen (the
+  // Approvals tab) is a read-and-decide action, not an offline capture
+  // flow, so it doesn't need one.
+  late final ApiClient _accountingApi;
   late final SyncService _sync;
   final String _deviceId = const Uuid().v4();
 
@@ -125,6 +130,7 @@ class _MetrockAppState extends State<MetrockApp> {
     _fleetApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/fleet', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
     _hrApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/hr', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
     _governanceApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/governance', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
+    _accountingApi = ApiClient(baseUrl: '$_devGatewayBaseUrl/accounting', deviceId: _deviceId, auth: _auth, httpClient: widget.httpClient);
     // Governance has no SyncModule entry at all — master data is
     // pull-only per SDD §3.A, never edited offline, so there's nothing
     // for the sync engine to push/pull for this module.
@@ -180,6 +186,7 @@ class _MetrockAppState extends State<MetrockApp> {
                   fleetApi: _fleetApi,
                   hrApi: _hrApi,
                   governanceApi: _governanceApi,
+                  accountingApi: _accountingApi,
                   deviceId: _deviceId,
                   sync: _sync,
                   onLogout: _auth.logout,
@@ -205,6 +212,7 @@ class _HomeScreen extends StatelessWidget {
     required this.fleetApi,
     required this.hrApi,
     required this.governanceApi,
+    required this.accountingApi,
     required this.deviceId,
     required this.sync,
     required this.onLogout,
@@ -218,6 +226,7 @@ class _HomeScreen extends StatelessWidget {
   final ApiClient fleetApi;
   final ApiClient hrApi;
   final ApiClient governanceApi;
+  final ApiClient accountingApi;
   final String deviceId;
   final SyncService sync;
   final Future<void> Function() onLogout;
@@ -225,7 +234,7 @@ class _HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 7,
+      length: 8,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Metrock ERP'),
@@ -239,6 +248,7 @@ class _HomeScreen extends StatelessWidget {
               Tab(text: 'Vehicles'),
               Tab(text: 'Employees'),
               Tab(text: 'Users'),
+              Tab(text: 'Approvals'),
             ],
           ),
           actions: [
@@ -262,6 +272,12 @@ class _HomeScreen extends StatelessWidget {
             _VehiclesTab(db: db, api: fleetApi, deviceId: deviceId, sync: sync),
             _EmployeesTab(db: db, api: hrApi, deviceId: deviceId, sync: sync),
             _UsersTab(api: governanceApi),
+            _ApprovalsTab(
+              procurementApi: procurementApi,
+              accountingApi: accountingApi,
+              fleetApi: fleetApi,
+              manufacturingApi: manufacturingApi,
+            ),
           ],
         ),
       ),
@@ -1187,6 +1203,259 @@ class _UserDetailScreen extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A real back-office inbox — everything currently pending
+/// approval_matrix sign-off, across all four modules that use it
+/// (Purchase Orders, Journal Entries, Maintenance Requests, Production
+/// Batch cost reviews), in one place rather than scattered across each
+/// module's own tab. Closes the "approval_matrix has zero UI anywhere"
+/// gap (README "Known gaps") — that was true for all four, including
+/// Purchase Orders, the original approval_matrix module; this tab is the
+/// first screen in this app that can approve or reject anything.
+///
+/// No client-side role gating: this tab is visible to every signed-in
+/// user, same as every other tab in this app — the real gate is the
+/// server's checkApprovalAuthority/checkAuthority, which a wrong-tier
+/// user hits as a real error surfaced via SnackBar, not something this
+/// screen tries to prevent by hiding the buttons. Plain StatefulWidget,
+/// no cubit — these are pure online-only decide-now actions with no
+/// offline capture or local Drift storage involved at all, same
+/// complexity level as the Customers/Vehicles/Employees tabs, not the
+/// two-step capture screens that actually need one.
+///
+/// Field names differ per module because the underlying endpoints do:
+/// Purchase Orders/Journal Entries/Maintenance Requests all go through
+/// Prisma (camelCase JSON); Production Batches' list endpoint is raw SQL
+/// (`SELECT *`, manufacturing-service's findAllBatches) and returns the
+/// database's own snake_case column names — not a typo, a real
+/// difference this screen has to know about.
+class _ApprovalsTab extends StatefulWidget {
+  const _ApprovalsTab({
+    required this.procurementApi,
+    required this.accountingApi,
+    required this.fleetApi,
+    required this.manufacturingApi,
+  });
+  final ApiClient procurementApi;
+  final ApiClient accountingApi;
+  final ApiClient fleetApi;
+  final ApiClient manufacturingApi;
+
+  @override
+  State<_ApprovalsTab> createState() => _ApprovalsTabState();
+}
+
+class _ApprovalsTabState extends State<_ApprovalsTab> {
+  List<Map<String, dynamic>> _purchaseOrders = [];
+  List<Map<String, dynamic>> _journalEntries = [];
+  List<Map<String, dynamic>> _maintenanceRequests = [];
+  List<Map<String, dynamic>> _productionBatches = [];
+  bool _loading = true;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final results = await Future.wait([
+        widget.procurementApi.fetchPurchaseOrders(),
+        widget.accountingApi.fetchJournalEntries(),
+        widget.fleetApi.fetchMaintenanceRequests(),
+        widget.manufacturingApi.fetchProductionBatches(),
+      ]);
+      setState(() {
+        _purchaseOrders = results[0].where((r) => r['approvalStatus'] == 'PENDING').toList();
+        _journalEntries = results[1].where((r) => r['status'] == 'PENDING_APPROVAL').toList();
+        _maintenanceRequests = results[2].where((r) => r['requestStatus'] == 'PENDING_APPROVAL').toList();
+        _productionBatches = results[3].where((r) => r['cost_review_status'] == 'PENDING_APPROVAL').toList();
+        _loadError = null;
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _loadError = 'Could not reach server (offline?): $e';
+        _loading = false;
+      });
+    }
+  }
+
+  /// Runs an approve/reject call, shows a SnackBar either way, and
+  /// reloads on success so the acted-on item disappears from its list —
+  /// the server's own response is the source of truth for whether it
+  /// worked, this never optimistically removes an item beforehand.
+  Future<void> _act(Future<Map<String, dynamic>> Function() action, String successMessage) async {
+    try {
+      await action();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(successMessage)));
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Action failed: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  /// Purchase Order rejection is the one action on this tab that needs
+  /// input beyond "which item" — procurement-service's `RejectPurchaseOrderDto`
+  /// requires a `reasonCode` (see ApiClient.rejectPurchaseOrder's doc comment).
+  /// Prompts for it, then runs the same `_act` path as every other action.
+  Future<void> _rejectPurchaseOrderWithReason(Map<String, dynamic> po) async {
+    final controller = TextEditingController();
+    final reasonCode = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reject purchase order'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Reason for rejection'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text.trim()),
+            child: const Text('Reject'),
+          ),
+        ],
+      ),
+    );
+    if (reasonCode == null || reasonCode.isEmpty) return;
+    await _act(
+      () => widget.procurementApi.rejectPurchaseOrder(po['poId'] as String, reasonCode),
+      'Purchase order rejected.',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadError != null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_loadError!)));
+    }
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final sections = <Widget>[];
+
+    if (_purchaseOrders.isNotEmpty) {
+      sections.add(_sectionHeader('Purchase Orders (${_purchaseOrders.length})'));
+      sections.addAll(_purchaseOrders.map(
+        (po) => _approvalTile(
+          title: po['poNumber'] as String,
+          subtitle: 'Value: ${po['totalPoValue']}',
+          onApprove: () => _act(
+            () => widget.procurementApi.approvePurchaseOrder(po['poId'] as String),
+            'Purchase order approved.',
+          ),
+          onReject: () => _rejectPurchaseOrderWithReason(po),
+        ),
+      ));
+    }
+
+    if (_journalEntries.isNotEmpty) {
+      sections.add(_sectionHeader('Journal Entries (${_journalEntries.length})'));
+      sections.addAll(_journalEntries.map((je) {
+        final lines = (je['lines'] as List).cast<Map<String, dynamic>>();
+        final amount = lines.fold<double>(0, (sum, l) => sum + (double.tryParse(l['debitAmount'].toString()) ?? 0));
+        return _approvalTile(
+          title: (je['memo'] as String?)?.isNotEmpty == true ? je['memo'] as String : 'Journal entry',
+          subtitle: 'Amount: ${amount.toStringAsFixed(2)}',
+          onApprove: () => _act(
+            () => widget.accountingApi.approveJournalEntry(je['journalEntryId'] as String),
+            'Journal entry approved.',
+          ),
+          onReject: () => _act(
+            () => widget.accountingApi.rejectJournalEntry(je['journalEntryId'] as String),
+            'Journal entry rejected.',
+          ),
+        );
+      }));
+    }
+
+    if (_maintenanceRequests.isNotEmpty) {
+      sections.add(_sectionHeader('Maintenance Requests (${_maintenanceRequests.length})'));
+      sections.addAll(_maintenanceRequests.map((mr) {
+        final total = (double.tryParse(mr['partsCost']?.toString() ?? '0') ?? 0) +
+            (double.tryParse(mr['labourCost']?.toString() ?? '0') ?? 0);
+        return _approvalTile(
+          title: mr['reason'] as String? ?? 'Maintenance request',
+          subtitle: 'Cost: ${total.toStringAsFixed(2)}',
+          onApprove: () => _act(
+            () => widget.fleetApi.approveMaintenanceRequest(mr['maintenanceRequestId'] as String),
+            'Maintenance request approved.',
+          ),
+          onReject: () => _act(
+            () => widget.fleetApi.rejectMaintenanceRequest(mr['maintenanceRequestId'] as String),
+            'Maintenance request rejected.',
+          ),
+        );
+      }));
+    }
+
+    if (_productionBatches.isNotEmpty) {
+      sections.add(_sectionHeader('Production Batch Cost Reviews (${_productionBatches.length})'));
+      sections.addAll(_productionBatches.map(
+        (b) => _approvalTile(
+          title: b['batch_number'] as String? ?? 'Batch',
+          subtitle: 'Cost: ${b['batch_cost']}',
+          onApprove: () => _act(
+            () => widget.manufacturingApi.approveProductionBatch(b['batch_id'] as String),
+            'Batch cost review approved.',
+          ),
+          onReject: () => _act(
+            () => widget.manufacturingApi.rejectProductionBatch(b['batch_id'] as String),
+            'Batch cost review rejected.',
+          ),
+        ),
+      ));
+    }
+
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: sections.isEmpty
+          ? ListView(
+              children: const [
+                Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('Nothing pending approval.')),
+                ),
+              ],
+            )
+          : ListView(children: sections),
+    );
+  }
+
+  Widget _sectionHeader(String label) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+        child: Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+      );
+
+  Widget _approvalTile({
+    required String title,
+    required String subtitle,
+    required VoidCallback onApprove,
+    required VoidCallback onReject,
+  }) {
+    return ListTile(
+      title: Text(title),
+      subtitle: Text(subtitle),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(icon: const Icon(Icons.check_circle, color: Colors.green), onPressed: onApprove, tooltip: 'Approve'),
+          IconButton(icon: const Icon(Icons.cancel, color: Colors.red), onPressed: onReject, tooltip: 'Reject'),
+        ],
       ),
     );
   }

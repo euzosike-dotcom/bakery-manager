@@ -306,16 +306,20 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   needing conditional logic by using two event types (favorable/
   unfavorable) instead; a module that genuinely needs conditional posting
   logic will need this implemented for real.
-- **Accounting has no Flutter UI** — by design, not an oversight. Bill/
-  invoice payment recording is an inherently connected back-office action
-  (same scope decision as Sales's NCR verification step), so there's no
-  offline-capturable entity for it to add to the sync engine. CRM's
-  Activities screen (offline-capturable) and the Sales Order customer
-  picker both exist and are proven on-device — see `docs/RUNBOOK.md`'s
-  "Vertical Slice #4" §6 for the real kill-the-backend verification,
-  including two real bugs it surfaced and fixed (a numeric-as-string
-  cast bug in two of the Procurement/Manufacturing pull handlers, and a
-  BigInt-JSON-serialization bug in crm-service's Activities list endpoint).
+- **Accounting has no Flutter UI for bill/invoice payment recording** — by
+  design, not an oversight. That's an inherently connected back-office
+  action (same scope decision as Sales's NCR verification step), so
+  there's no offline-capturable entity for it to add to the sync engine.
+  Journal Entry approval review IS now on-device (the Approvals tab,
+  below) — that's a read-and-decide action, not a capture flow, so it
+  doesn't carry the same offline-capture argument this gap was
+  originally about. CRM's Activities screen (offline-capturable) and the
+  Sales Order customer picker both exist and are proven on-device — see
+  `docs/RUNBOOK.md`'s "Vertical Slice #4" §6 for the real
+  kill-the-backend verification, including two real bugs it surfaced and
+  fixed (a numeric-as-string cast bug in two of the
+  Procurement/Manufacturing pull handlers, and a BigInt-JSON-
+  serialization bug in crm-service's Activities list endpoint).
 - **NCR-based and invoice-payment-based AR recovery are now reconciled** —
   the overlap `014_accounting.sql`'s header comment originally flagged
   (both crediting the same GL account, 1210, with no cross-check) turned
@@ -394,9 +398,10 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   field freely, and the fuel-variance/Scenario-#9 workflows this would
   exercise are already proven directly against fleet-service (see
   `docs/RUNBOOK.md`'s "Vertical Slice #5" §4).
-- **`maintenance_requests` has no Flutter UI** — listing and completing a
-  request (the one online-only back-office action in this module, mirrors
-  NCR verification) were only proven via curl.
+- **`maintenance_requests` has no Flutter UI for submitting/completing a
+  request** — that capture flow was only proven via curl. Reviewing a
+  completed request's cost approval IS now on-device (the Approvals tab,
+  below).
 - **HR's `leave_requests` and true `salary_structures` are not built** —
   the SDD itself scopes attendance clock-in/out as the only offline-
   relevant surface in this module; neither is required to prove that
@@ -495,7 +500,15 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   section for the full verification trail, including two real bugs found
   only by hitting a live database (a missing `UPDATE` grant on
   `journal_entries`, and a BigInt/JSON.stringify serialization crash on
-  manufacturing-service's first `sync_seq`-returning GET endpoint).
+  manufacturing-service's first `sync_seq`-returning GET endpoint). All
+  four modules' approve/reject now have a real mobile client too — a
+  unified Approvals tab in the Flutter app, the first approve/reject UI
+  anywhere in this platform (not even Procurement, the module this was
+  originally built for, had one before this). See `docs/RUNBOOK.md`'s
+  "Approvals tab" section for the field-shape survey across the four
+  differently-shaped endpoints, a real `reasonCode` bug the live
+  verification caught and fixed, and the full tier-boundary verification
+  trail across two real Keycloak users.
 - **Automated test coverage now spans every part of the platform — all 8
   Node services, the Go `ledger-service`'s pure logic, procurement-service
   against a real Postgres, and the Flutter mobile app — but is uneven by

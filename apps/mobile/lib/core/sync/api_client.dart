@@ -46,6 +46,22 @@ class ApiClient {
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
   }
 
+  /// Approve/reject pairs for the four approval_matrix-gated workflows —
+  /// Purchase Orders (this method), Journal Entries, Maintenance Requests,
+  /// Production Batches (below) — all for the new Approvals tab. The
+  /// server's checkApprovalAuthority/checkAuthority is the real gate in
+  /// every case; this client never hides these actions based on the
+  /// signed-in user's own role, same as every other action in this app —
+  /// a wrong-tier attempt surfaces as a real ApiException the screen shows
+  /// via SnackBar, not something this class tries to prevent client-side.
+  Future<Map<String, dynamic>> approvePurchaseOrder(String poId) => _post('purchase-orders/$poId/approve');
+
+  /// Unlike the other three reject methods below, procurement-service
+  /// requires a `reasonCode` body on this one (`RejectPurchaseOrderDto`) —
+  /// a free-text audit note, not a validated enum value server-side.
+  Future<Map<String, dynamic>> rejectPurchaseOrder(String poId, String reasonCode) =>
+      _post('purchase-orders/$poId/reject', body: {'reasonCode': reasonCode});
+
   /// Recipes (with nested versions + ingredients) — fetched directly online,
   /// same simplification as fetchPurchaseOrders: master/reference data isn't
   /// on the cursor-based pull path yet (see README "Known gaps"), only the
@@ -117,6 +133,58 @@ class ApiClient {
     final res = await _client.get(Uri.parse('$baseUrl/users'), headers: await _headers);
     _throwIfNotOk(res);
     return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  /// Journal Entries pending approval, for the Approvals tab — called
+  /// against accounting-service, this app's first-ever Accounting screen
+  /// (README "Known gaps": "Accounting has no Flutter UI at all" — still
+  /// true for bill/invoice payment capture, but approval review is a
+  /// read-and-decide action, not a capture flow, so it doesn't carry the
+  /// same offline-capture argument that gap was originally about).
+  Future<List<Map<String, dynamic>>> fetchJournalEntries() async {
+    final res = await _client.get(Uri.parse('$baseUrl/journal-entries'), headers: await _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> approveJournalEntry(String journalEntryId) => _post('journal-entries/$journalEntryId/approve');
+  Future<Map<String, dynamic>> rejectJournalEntry(String journalEntryId) => _post('journal-entries/$journalEntryId/reject');
+
+  /// Maintenance Requests pending approval, for the Approvals tab.
+  Future<List<Map<String, dynamic>>> fetchMaintenanceRequests() async {
+    final res = await _client.get(Uri.parse('$baseUrl/maintenance-requests'), headers: await _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> approveMaintenanceRequest(String maintenanceRequestId) =>
+      _post('maintenance-requests/$maintenanceRequestId/approve');
+  Future<Map<String, dynamic>> rejectMaintenanceRequest(String maintenanceRequestId) =>
+      _post('maintenance-requests/$maintenanceRequestId/reject');
+
+  /// Production Batches whose cost review is pending — for the Approvals
+  /// tab. Retrospective, not gating (see production.service.ts's own doc
+  /// comment): the batch itself already posted unconditionally by the
+  /// time this ever shows PENDING_APPROVAL, so approving/rejecting here
+  /// only ever affects cost_review_status, never undoes anything already
+  /// posted.
+  Future<List<Map<String, dynamic>>> fetchProductionBatches() async {
+    final res = await _client.get(Uri.parse('$baseUrl/production-batches'), headers: await _headers);
+    _throwIfNotOk(res);
+    return (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> approveProductionBatch(String batchId) => _post('production-batches/$batchId/approve');
+  Future<Map<String, dynamic>> rejectProductionBatch(String batchId) => _post('production-batches/$batchId/reject');
+
+  Future<Map<String, dynamic>> _post(String path, {Map<String, dynamic>? body}) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/$path'),
+      headers: await _headers,
+      body: body == null ? null : jsonEncode(body),
+    );
+    _throwIfNotOk(res);
+    return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
   /// Pushes a batch of outbox events. Returns the per-event result array —
