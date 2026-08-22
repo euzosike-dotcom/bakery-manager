@@ -4715,3 +4715,157 @@ real seeded rows existing for the actual tenant.
   calculation time, so this is correct going forward, but nothing
   models a tax law changing mid-tenure the way a real payroll system's
   historical-band versioning would).
+
+## Accounting period-close
+
+`reports.service.ts`'s own class doc comment named this gap explicitly:
+"a real GL would zero P&L accounts into an equity Retained Earnings
+balance at period end" — Balance Sheet's `totalAssets` differs from
+`totalLiabilities + totalEquity` by exactly the unclosed `netIncome`
+whenever there's REVENUE/EXPENSE activity that's never been folded into
+EQUITY, which was always, since nothing ever did that folding. This pass
+builds the real closing operation.
+
+### 1. `3100 Retained Earnings` — the first EQUITY account this platform has ever had
+
+`028_period_close.sql` seeds one new chart-of-accounts row. Checked
+before writing this: no migration or seed file across the whole
+platform had ever inserted an `EQUITY`-typed account, despite the
+`account_type` CHECK constraint allowing one since `005_finance.sql`
+first created the table — every other module's own GL accounts are
+ASSET/LIABILITY/REVENUE/EXPENSE. No new grants needed:
+`chart_of_accounts` is reference data, same as every other module's own
+new accounts (HR's 5340/2130, Fleet's 5320/5330, etc.) — inserted via
+migration, never written by the application.
+
+### 2. Design: not tied to a calendar period, because nothing else here is either
+
+Real accounting systems close a specific fiscal period. This platform's
+`journal_entries` has no period column anywhere, and neither Trial
+Balance, P&L, nor Balance Sheet filter by date — they are, and remain,
+all-time snapshots. Retrofitting period-tracking into the reports layer
+just to give period-close a boundary to work against would be
+substantially more scope than this gap needs. Instead, `closeBooks`
+closes whatever CURRENT revenue/expense activity is unclosed, with no
+period boundary at all — and this turns out to be naturally,
+automatically incremental without any extra bookkeeping: a closing
+entry's own lines hit the exact same revenue/expense accounts they
+zero, so by the time a SECOND close runs, those accounts' balances only
+reflect whatever posted since the first close — the first close's own
+effect is already netted in. Verified for real, not just argued (see
+Verification below).
+
+### 3. Reusing `ReportsService.accountBalances`, not re-deriving it
+
+`PeriodCloseService` (`src/period-close/`) is a new module that imports
+`ReportsModule` and injects `ReportsService` directly — `accountBalances`
+(previously `private`) is the exact computation Trial Balance/P&L/
+Balance Sheet already do, and period-close needs the identical current
+balances they read, so this reuses that method rather than writing a
+second, parallel query.
+
+Writes `journal_entries`/`journal_lines` directly, the same as
+`JournalsService`'s manual entries (`accounting_svc`'s direct-insert
+grant, migration 015, exists for precisely this reason) — and for the
+same underlying reason: the debit/credit shape here (N dynamic revenue
+lines + N dynamic expense lines + one balancing line into Retained
+Earnings) can't be expressed by `posting_rules`' fixed one-event-type-
+to-one-debit-account-and-one-credit-account mapping, so this can never
+go through ledger-service's Kafka-driven posting path at all, no matter
+how the rest of the design shakes out.
+
+**Not** the two-party `PENDING_APPROVAL` workflow manual journal entries
+use (`approval_matrix` expansion, migration 022) — period-close posts
+immediately (`status: POSTED`) behind a single `checkAuthority` call
+(`can_post`/`ACCOUNTING`), the exact same shape as vendor bill payment
+and customer invoice payment (`bills.service.ts`/`invoices.service.ts`).
+A period close is a deliberate, already-decided action performed by one
+authorized finance person, not a proposal for someone else to review —
+structurally closer to "execute this payment" than to "propose this
+adjusting entry."
+
+### 4. A real bug: not every EXPENSE account has a debit-normal balance here
+
+The first implementation assumed textbook normal-balance conventions:
+REVENUE accounts always net credit, EXPENSE accounts always net debit,
+and computed each zeroing line's debit/credit purely from account type.
+Running it against the real, messy dev database — accumulated from
+every prior verification pass in this session — immediately produced a
+real `PrismaClientUnknownRequestError` wrapping a genuine Postgres
+`23514`: `journal_lines` violates `one_sided_line`. The cause:
+Manufacturing's favorable-variance postings (`production.service.ts`,
+the approval_matrix expansion pass) credit an EXPENSE account
+(`5310 Manufacturing Variance Expense`) more than they debit it — a
+completely legitimate, real posting pattern this platform already had —
+leaving that account with a net CREDIT balance. The buggy code computed
+`totalDebit - totalCredit` for that account (negative), then used it
+directly as `creditAmount`, producing a negative credit amount no valid
+journal line can have.
+
+Fixed by deriving each closing line purely from the account's signed
+`netDebit = totalDebit - totalCredit`, regardless of its `account_type`:
+positive `netDebit` is zeroed by crediting it, negative `netDebit` by
+debiting it — the same mechanical rule for REVENUE and EXPENSE alike.
+`netIncome` itself is then `sum(debitAmount) - sum(creditAmount)` across
+just the closing lines (the class doc comment on `PeriodCloseService`
+walks through why this is algebraically equivalent to
+`totalRevenue - totalExpense`). A regression test
+(`period-close.service.spec.ts`) locks in the exact real shape that
+broke: a credit-heavy EXPENSE account, asserting every generated line
+has non-negative debit and credit amounts.
+
+### 5. Verification — real accumulated data, a real bug, a real second close
+
+1. Unit tests (`period-close.service.spec.ts`, 6 tests): an ordinary
+   profitable close credits Retained Earnings; a loss debits it; net
+   income of exactly zero omits the Retained Earnings line entirely
+   (would otherwise violate `one_sided_line`); zero-activity accounts
+   are excluded; the credit-heavy-EXPENSE regression case above; and
+   "nothing to close" rejects with no write and no authority check at
+   all (not even attempted) when every revenue/expense account is
+   already at zero.
+2. Applied `028_period_close.sql` live; confirmed the `3100 Retained
+   Earnings` row exists with `account_type = EQUITY`.
+3. Checked the real dev database's P&L/Balance Sheet BEFORE closing:
+   `netIncome` ₦1,700,952.50, Balance Sheet `totalAssets` exceeding
+   `totalLiabilities + totalEquity` by that exact amount — the
+   documented bug, present for real, not hypothetical.
+4. First real close attempt hit the bug above (a genuine `500`, not a
+   contrived test). Fixed the code, rebuilt, restarted the service.
+5. Second real close attempt succeeded (`201`): inspected the actual
+   posted `journal_lines` directly — revenue debited ₦308,500 to zero,
+   `5310` (the credit-heavy account) correctly DEBITED ₦1,524,790 (not
+   credited — the fix in action), three ordinary debit-normal expense
+   accounts credited to zero, and Retained Earnings credited exactly
+   ₦1,700,952.50. Debits and credits balanced exactly
+   (₦1,833,290.00 each side).
+6. Balance Sheet afterward: `totalAssets - (totalLiabilities +
+   totalEquity) = 0.0`. P&L's `netIncome`: `0`.
+7. Inserted a small new real posting (₦5,000 revenue) directly, then
+   closed again: the resulting entry contained ONLY two lines — the new
+   ₦5,000 revenue zeroed, ₦5,000 credited to Retained Earnings — not a
+   re-close of anything already closed, confirming the "naturally
+   incremental, no period tracking needed" design claim against real
+   data, not just the argument for it. Balance Sheet still tied out
+   afterward.
+
+### Known gaps after this pass
+
+- No calendar period boundary at all, by design (see above) — a real
+  deployment that needs "close January, leave February open" (rather
+  than "close everything unclosed as of right now") would need actual
+  period tracking added to `journal_entries`, a bigger change than this
+  pass makes.
+- No un-close / reopen — once closed, the only way to adjust a closed
+  period is a new posting (which the next close would pick up), not a
+  reversal of the closing entry itself. `journal_entries.status` does
+  support `REVERSED` as a value, but nothing here uses it — reversing a
+  closing entry correctly would need to reopen exactly the accounts it
+  closed, which isn't implemented.
+- No UI — `POST /period-close` is proven by curl/API only, consistent
+  with Accounting having no Flutter UI at all (by design, per the
+  existing "Accounting has no Flutter UI" gap).
+- Single currency, single equity account — real multi-entity or multi-
+  currency closing (translation adjustments, multiple retained-earnings
+  accounts per legal entity) isn't attempted; this platform has neither
+  concept yet anywhere.

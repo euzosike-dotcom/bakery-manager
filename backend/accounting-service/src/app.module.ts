@@ -14,6 +14,7 @@ import { BillsModule } from './bills/bills.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { JournalsModule } from './journals/journals.module';
 import { ReportsModule } from './reports/reports.module';
+import { PeriodCloseModule } from './period-close/period-close.module';
 import { KafkaConsumerModule } from './kafka/kafka-consumer.module';
 
 @Module({
@@ -29,6 +30,7 @@ import { KafkaConsumerModule } from './kafka/kafka-consumer.module';
     InvoicesModule,
     JournalsModule,
     ReportsModule,
+    PeriodCloseModule,
     KafkaConsumerModule,
   ],
 })

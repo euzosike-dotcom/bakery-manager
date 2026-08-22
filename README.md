@@ -274,12 +274,37 @@ See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for step-by-step setup.
   comment). No rule exists anywhere in the original PRD for whether a
   customer-invoiced order should even participate in agent capital at all,
   since that PRD predates the CRM/customer concept entirely.
-- **No period-close / retained-earnings roll-forward** in Accounting's
-  reports — Trial Balance/P&L/Balance Sheet are all-time snapshots, so
-  Balance Sheet's `totalAssets` will always differ from
-  `totalLiabilities + totalEquity` by exactly the P&L's unclosed
-  `netIncome`. Expected, not a bug — see `reports.service.ts`'s class doc
-  comment.
+- **Period-close is now real** — `POST /period-close` (accounting-service)
+  zeroes every REVENUE and EXPENSE account's current balance into a new
+  `3100 Retained Earnings` EQUITY account (the chart of accounts never
+  had an EQUITY account before this, despite the schema allowing one
+  since the Unified Ledger shipped). Trial Balance/P&L/Balance Sheet
+  themselves are unchanged — still all-time snapshots, no period concept
+  anywhere in `journal_entries` — so `totalAssets` still differs from
+  `totalLiabilities + totalEquity` by exactly whatever net income hasn't
+  been explicitly closed yet; period-close is the real, deliberate action
+  that closes it, not something the reports do automatically. Zeroing an
+  account only cares about its actual signed balance, never assumes
+  REVENUE is always credit-heavy or EXPENSE always debit-heavy — a real
+  bug surfaced by running this against real accumulated data: Manufacturing's
+  favorable-variance postings leave an EXPENSE account (`5310`) with a net
+  *credit* balance, and the first implementation's per-type assumption
+  produced a negative credit amount that Postgres correctly rejected
+  (`one_sided_line` violation, a real `23514` error, not a typecheck
+  catch). Fixed to derive each line's debit/credit purely from its
+  signed balance. Posts immediately behind a single `checkAuthority`
+  gate (`can_post`) — the same shape as vendor bill payment and customer
+  invoice payment, not the two-party `PENDING_APPROVAL` workflow manual
+  journal entries use, since a period close is a deliberate action by one
+  authorized person, not a proposal for someone else to decide. Verified
+  against the real accumulated dev database (₦1,700,952.50 of unclosed
+  net income at the time): after closing, Balance Sheet tied out exactly
+  (`totalAssets - (totalLiabilities + totalEquity) = 0`) and P&L's
+  `netIncome` read `0`; a second close after a small amount of fresh
+  activity posted only that new activity, not a re-close of everything —
+  confirming closes are naturally incremental, no explicit period
+  tracking required. See `docs/RUNBOOK.md`'s "Accounting period-close"
+  section for the full trail.
 - **CRM has no Lead/Customer conversion workflow, no dedup/merge** — one
   `customers` table serves both "prospect" and "existing customer" via
   `customer_status`, a deliberate simplification (`012_crm.sql`'s header

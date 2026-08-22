@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 
-interface AccountBalance {
+export interface AccountBalance {
   accountCode: string;
   accountName: string;
   accountType: string;
@@ -12,12 +12,18 @@ interface AccountBalance {
 /**
  * Reads the SAME journal_entries/journal_lines ledger-service already
  * posts to (migration 005) — this module adds no new financial truth, only
- * ways of looking at what's already there. No period-close / retained-
- * earnings roll-forward is implemented (a real GL would zero P&L accounts
- * into an equity "Retained Earnings" balance at period end); these reports
- * are all-time as-of-now snapshots, which is sufficient to prove the
- * pattern but means Balance Sheet's own net income isn't folded into
- * Equity — a known simplification, not a bug in the numbers shown.
+ * ways of looking at what's already there. These reports are all-time
+ * as-of-now snapshots — there is no period concept anywhere in this
+ * platform's journal_entries (no period column, no date-range filtering
+ * here), so Trial Balance/P&L/Balance Sheet always reflect everything
+ * ever posted, not "this month" or "this year" in isolation.
+ *
+ * Period-close (../period-close/period-close.service.ts) is a real,
+ * explicit action — not automatic — that zeroes current REVENUE/EXPENSE
+ * balances into an EQUITY "Retained Earnings" account. Until it's
+ * triggered, Balance Sheet's totalAssets will differ from
+ * totalLiabilities + totalEquity by exactly whatever net income hasn't
+ * been closed yet; that's expected, not a bug in the numbers shown.
  *
  * `journalEntry: { status: 'POSTED' }` below matters more than it looks —
  * migration 022 (approval_matrix expansion, docs/RUNBOOK.md) gave manual
@@ -33,7 +39,11 @@ interface AccountBalance {
 export class ReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async accountBalances(tenantId: string): Promise<AccountBalance[]> {
+  // Not private — PeriodCloseService (../period-close/period-close.service.ts)
+  // reuses this exact computation rather than re-deriving it; period-close
+  // needs to know CURRENT revenue/expense balances the same way these
+  // reports do, since it's the operation that zeroes them into equity.
+  async accountBalances(tenantId: string): Promise<AccountBalance[]> {
     return this.prisma.forTenant(tenantId, async (tx) => {
       const accounts = await tx.chartOfAccount.findMany({ where: { tenantId, isActive: true } });
       const sums = await tx.journalLine.groupBy({
